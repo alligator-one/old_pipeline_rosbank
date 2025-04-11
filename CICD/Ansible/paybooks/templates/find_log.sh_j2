@@ -1,0 +1,46 @@
+@#!/bin/bash@
+ 
+#---settings-------------------------------------
+ 
+{% raw %}
+ 
+#----------------------------------------
+cd $( cd "$(dirname "$0")" ; pwd -P )
+ 
+echo "dir_env:"{{ dir_env }}
+if [[ {{ dir_env }} == "/opt/siebel/ses/siebsrvr/enterprises/SIEBEL_CERT" ]]; then
+        cd {{ dir_env }}
+        app_name=$(ls -d */ | cut -f1 -d'/')
+        dir_env_task="{{ dir_env }}/$app_name/log"
+     fi
+     if [[ {{ dir_env }} == "/opt/siebel/ses/siebsrvr/enterprises/RSB_TST" ]]; then
+        cd {{ dir_env }}
+        app_name=$(ls -d */ | cut -f1 -d'/')
+        dir_env_task="{{ dir_env }}/$app_name/log"
+     fi
+     if [[ {{ dir_env }} == "/opt/siebel/ses/applicationcontainer_internal/logs" || {{ dir_env }} == "/opt/siebel/ai/applicationcontainer_external/logs" || {{ dir_env }} == "/opt/siebel/ses/applicationcontainer_external/logs" ]]; then
+        dir_env_task="{{ dir_env }}"
+     fi
+     if [[ {{ dir_env }} == "/opt/BIP/Middleware/Oracle_Home/user_projects/domains/bi/servers" ]]; then
+        cd {{ dir_env }}
+        app_name=$(ls -d */ | cut -f1 -d'/' | grep "bi_server")
+        dir_env_task="{{ dir_env }}/$app_name/logs/bipublisher"
+     fi    
+     if [[ -n {{ name_file_1 }} && ! -n {{ name_file_2 }} ]]; then
+        param_name_file="\( -name {{ name_file_1 }}* \)"
+     elif [[ ! -n {{ name_file_1 }} && -n {{ name_file_2 }} ]]; then
+        param_name_file="\( -name {{ name_file_2 }}* \)"
+     elif [[ -n {{ name_file_1 }} && -n {{ name_file_2 }} ]]; then
+        param_name_file="\( -name {{ name_file_1 }}* -or -name "{{ name_file_2 }}"* \)"
+     if [[ -n {{ newermt_begin }} && ! -n {{ newermt_end }} ]]; then
+        param_newermt="-newermt {{ newermt_begin }}"
+     elif [[ ! -n {{ newermt_begin }} && -n {{ newermt_end }} ]]; then
+        param_newermt="! -newermt {{ newermt_end }}"
+     elif [[ -n {{ newermt_begin }} && -n {{ newermt_end }} ]]; then
+        param_newermt="-newermt {{ newermt_begin }} ! -newermt {{ newermt_end }}"
+     fi
+     if [[ -n {{ find_context }} ]]; then
+        param_context="-exec grep -rl \"{{ find_context }}\" '{}' ';'"
+     fi       
+     find $dir_env_task -type f $param_name_file $param_newermt $param_context
+{% endraw %}
