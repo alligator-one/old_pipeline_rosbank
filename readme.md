@@ -538,13 +538,7 @@ Readme.md
 * [Publish](#PipelinesDockerBuildDevStagePublish)
  
 ### <a name="PipelinesDockerBuildDevParameters"></a> Параметры запуска
- 
-Данный пайплайн имеет следующие параметры запуска:
- 
-![docker-build-dev-parameters.png](assets/docker-build-dev-parameters.png)
- 
-Подробнее о параметрах:
- 
+
 * BRANCH - указывает, из какой ветки репозитория Siebel CICD необходимо клонировать код на агент.
  
 ### <a name="PipelinesDockerBuildDevStageCheckout"></a> Checkout
