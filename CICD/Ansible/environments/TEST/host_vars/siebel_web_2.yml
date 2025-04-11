@@ -1,0 +1,3 @@
+search_dst_path: "/opt/siebel/search/"
+public_dst_path: "/opt/siebel/sweapp/public/"
+htdocs_dst_path: "/opt/siebel/Middleware/Oracle_WT1/instances/instance1/config/OHS/ohs1/htdocs/"

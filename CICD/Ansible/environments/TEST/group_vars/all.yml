@@ -1,0 +1,21 @@
+deploy_base_dir: "/tmp/siebel-deploy"
+eai_log_appsrv_path: "/opt/siebel/ses/siebsrvr/enterprises"
+eai_url_path: "siebel/app/eai_anon_rus/rus/?SWEExtSource=AnonWebService&SWEExtCmd=Execute&WSSOAP=1"
+siebel_web_balancer_url: "SIEBEL_WEB_BALANSER"
+siebel_web_balancer_port: 443
+ad_user_prefix: "***"
+manual_adm_appsrv_path: "/opt/siebel/ses/siebsrvr/temp/ADM"
+rocketsiebel_test_host: "ROCKET_SIEBEL_TEST"
+web_frontend_backup_age: "15d"
+siebel_gateway: "rsbgscgate1.rosbank.rus.socgen"
+siebel_enterprise: "SIEBEL_SERVER"
+siebel_exp_odbc_name: "SIEBEL_ODBC_DSN"
+size_disk_c: 1000000
+siebel_size_opt: 1500000
+day_of_delete: "10d"
+cicd_siebel_dir_backup_repository: "/opt/scripts/Backup_Repository/Backup_Repository"
+cicd_siebel_dir_before_major_backup_repository: "/opt/scripts/Backup_Repository/Before_Major_Backup_Repository"
+cicd_siebel_dir_siebenv: "/opt/siebel/ses/siebsrvr"
+siebel_repo: "Siebel Repository"
+dir_name_find_log: "/opt/jenkins_find_log"
+tmp_dir_name_find_log: "/opt/tmp_dir_jenkins"

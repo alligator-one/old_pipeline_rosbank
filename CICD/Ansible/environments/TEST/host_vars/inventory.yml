@@ -1,0 +1,39 @@
+all:
+  hosts:
+    rocketsiebel:
+      ansible_host: ANSIBLE_SERVER
+    siebel_app_result_find_log:
+      ansible_host: ANSIBLE_SERVER_2
+      ansible_user: ***
+      ansible_ssh_private_key_file: /tmp/siebel_ssh_private_key
+  children:
+    siebel:
+      hosts:
+        siebel_app_1:
+          ansible_host: ANSIBLE_SERVER_3
+          ansible_user: ***
+          ansible_ssh_private_key_file: /tmp/siebel_ssh_private_key
+        siebel_app_2:
+          ansible_host: ANSIBLE_SERVER_4
+          ansible_user: siebel
+          ansible_ssh_private_key_file: /tmp/siebel_ssh_private_key
+    siebel_web:
+      hosts:
+        siebel_web_1:
+          ansible_host: ANSIBLE_WEB_SERVER
+          ansible_user: ***
+          ansible_ssh_private_key_file: /tmp/siebel_ssh_private_key
+        siebel_web_2:
+          ansible_host: ANSIBLE_WEB_3
+          ansible_user: ***
+          ansible_ssh_private_key_file: /tmp/siebel_ssh_private_key
+    siebel_bip:
+      hosts:
+        siebel_bip_1:
+          ansible_host: ANSIBLE_4
+          ansible_user: ***
+          ansible_ssh_private_key_file: /tmp/siebel_ssh_private_key
+        siebel_bip_2:
+          ansible_host: ANSIBLE_SERVER_5
+          ansible_user: ***
+          ansible_ssh_private_key_file: /tmp/siebel_ssh_private_key

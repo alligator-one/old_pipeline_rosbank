@@ -1,0 +1,169 @@
+main () {
+  process_input_params "$@"
+  echo "Запущен скрипт проверки состояния процесса со следующими параметрами: "
+  echo "MY_PROCESS=\"${MY_PROCESS}\"; MY_STATE=\"${MY_STATE}\"; MY_TIMEOUT=\"${MY_TIMEOUT}\"; MY_CHECK_INTERVAL=\"${MY_CHECK_INTERVAL}\""
+  echo ""
+  if [ "$MY_STATE" == "stopped" ]; then
+    wait_for_stop
+  elif [ "$MY_STATE" == "started" ]; then
+    wait_for_start
+  else
+    echo "Parameter \"-state\" must be \"stopped\" or \"started\""
+    exit 1
+  fi
+ 
+  echo "Test after all"
+}
+ 
+ 
+process_input_params() {
+  if [ -n "$1" ]; then
+    if [ $# -ge 4 ]; then
+      while [ -n "$1" ]; do
+        case "$1" in
+          -process)         MY_PROCESS="$2"
+                            shift;;
+          -state)           MY_STATE="$2"
+                            shift;;
+          -timeout)         MY_TIMEOUT="$2"
+                            shift;;
+          -check_interval)  MY_CHECK_INTERVAL="$2"
+                            shift;;
+          *) echo "$1 is not an option"
+            exit 1;;
+        esac
+        shift
+      done
+    else
+      echo "Wrong params amount! Number of params = $#"
+      exit 1
+    fi
+  else
+    echo dd=$1
+    echo "No parameters found."
+    exit 1
+  fi
+ 
+  if [ -z "${MY_PROCESS}" ] || [ -z "${MY_STATE}" ]; then
+    echo "Params \"-process\" and \"-state\" are mandatory!"
+    exit 1
+  fi
+ 
+  MY_TIMEOUT=${MY_TIMEOUT:-120}
+  MY_CHECK_INTERVAL=${MY_CHECK_INTERVAL:-5}
+  MY_PORTS=${MY_PORTS:-8005,8080,8443}
+  HTTP_PORTS=${HTTP_PORTS:-80,8080}
+  HTTPS_PORTS=${HTTPS_PORTS:-443,8443}
+}
+ 
+wait_for_stop () {
+  i=0
+  while [ "$i" -lt "$MY_TIMEOUT" ]
+  do
+    if [ -z "$(pgrep ${MY_PROCESS})" ]; then
+      echo "Процесс \"${MY_PROCESS}\" не найден! Сервис остановлен успешно"
+      return
+    fi
+    PID="$(pgrep ${MY_PROCESS} | tr '\n' ' ')"
+    echo sleep
+    sleep $MY_CHECK_INTERVAL
+    i=$((i + $MY_CHECK_INTERVAL))
+    echo "Прошло ${i} сек. Процесс \"${MY_PROCESS}\" все еще запущен. Продолжаем ожидание. PIDs процесса(ов): $PID"
+  done
+  echo "Процесс \"${MY_PROCESS}\" не завершился за ${MY_TIMEOUT} сек! Завершаем ожидание с ошибкой! PIDs процесса(ов): $PID"
+  exit 1
+}
+ 
+wait_for_start () {
+  i=0
+  while [ "$i" -lt "$MY_TIMEOUT" ]
+  do
+    echo sleep; echo ""
+    sleep $MY_CHECK_INTERVAL
+    i=$((i + $MY_CHECK_INTERVAL))
+ 
+    if [ -n "$(pgrep ${MY_PROCESS})" ]; then
+      echo "Процесс \"${MY_PROCESS}\" найден! Проверяем прослушиваемые порты \"$MY_PORTS\""
+      FAILED_PORTS_COUNT=0
+      DEFAULT_IFS=$IFS
+      IFS=','
+      for MY_PORT in $MY_PORTS; do
+        WEB_PORT="no"
+        HTTP_PORT="no"
+        HTTPS_PORT="no"
+        containsElement "$HTTP_PORTS" $MY_PORT && WEB_PORT="yes" && HTTP_PORT="yes"
+        containsElement "$HTTPS_PORTS" $MY_PORT && WEB_PORT="yes" && HTTPS_PORT="yes"
+ 
+        echo "MY_PORT=$MY_PORT; WEB_PORT=$WEB_PORT; HTTP_PORT=$HTTP_PORT; HTTPS_PORT=$HTTPS_PORT"
+        if [ $(netstat -lptun 2>/dev/null | grep ${MY_PROCESS} | grep ${MY_PORT} | wc -l) -ge "1" ]; then
+            echo "Проверка поднятого порта ${MY_PORT} : OK"
+ 
+            if [ $WEB_PORT == "yes" ]; then
+              if [ $HTTP_PORT == "yes" ];then
+                echo "Порт $MY_PORT содержится в списке HTTP портов. Выполняем HTTP проверку: curl -I http://127.0.0.1:${MY_PORT}"
+                WEB_ANSWER=$(curl -I http://127.0.0.1:${MY_PORT} 2>/dev/null | grep HTTP)
+                WEB_ANSWER_ALL=$(curl -I http://127.0.0.1:${MY_PORT} 2>&1)
+                check_web_answer "$WEB_ANSWER" $MY_PORT "$WEB_ANSWER_ALL"|| FAILED_PORTS_COUNT=$((FAILED_PORTS_COUNT + 1))
+              fi
+              if [ $HTTPS_PORT == "yes" ];then
+                echo "Порт $MY_PORT содержится в списке HTTPs портов. Выполняем HTTPs проверку: curl -I https://127.0.0.1:${MY_PORT} --verbose --insecure"
+                WEB_ANSWER=$(curl -I https://127.0.0.1:${MY_PORT} --verbose --insecure 2>/dev/null | grep HTTP)
+                WEB_ANSWER_ALL=$(curl -I https://127.0.0.1:${MY_PORT} --verbose --insecure 2>&1)
+                check_web_answer "$WEB_ANSWER" $MY_PORT "$WEB_ANSWER_ALL" || FAILED_PORTS_COUNT=$((FAILED_PORTS_COUNT + 1))
+              fi
+            else
+                echo "Порт $MY_PORT НЕ содержится в списке HTTP или HTTPs портов. Не выполняем проверки web сервера"
+            fi
+        else
+            echo "Проверка поднятого порта ${MY_PORT} : FAILED"
+            FAILED_PORTS_COUNT=$((FAILED_PORTS_COUNT + 1))
+        fi
+      done
+      IFS=$DEFAULT_IFS
+      if [ $FAILED_PORTS_COUNT -eq 0 ]; then
+        echo "Все порты прослушиваются. Сервис запущен."
+        return
+      else
+        echo "Не все порты прослушиваются. Продолжаем ожидание" && echo "" && echo ""
+      fi
+    else
+      echo "Прошло ${i} сек. Процесс \"${MY_PROCESS}\" все еще не запущен. Продолжаем ожидание запуска процесса."
+    fi
+  done
+  echo "Процесс \"${MY_PROCESS}\" не запустился за ${MY_TIMEOUT} сек! Завершаем ожидание с ошибкой!"
+  exit 1
+}
+ 
+containsElement () {
+  MY_ARRAY=$1
+  MY_ELEMENT=$2
+  DEFAULT_IFS=$IFS
+  IFS=','
+  for ELEMENT in $MY_ARRAY; do
+    #echo "Check ELEMENT=$ELEMENT; MY_ELEMENT=$MY_ELEMENT"
+    if [ $ELEMENT -eq $MY_ELEMENT ]; then
+      #echo "FIND!"
+      IFS=$DEFAULT_IFS
+      return 0
+    fi
+  done
+  IFS=$DEFAULT_IFS
+  #echo "Not find!"
+  return 1
+}
+ 
+check_web_answer () {
+  #echo "ANSWER=$1; PORT=$2"
+  if [ -n "$(echo "${1}" | grep 200)" ]; then
+    echo "Проверка ответа по ${2}: OK. Ответ web сервера: ${1}"
+    return 0
+  else
+    echo "Проверка ответа по ${2}: FAILED. Ответ web сервера: "
+    echo "=================================================="
+    echo "${3}"
+    echo "=================================================="
+    return 1
+  fi
+}
+ 
+main "$@"; exit

@@ -1,0 +1,41 @@
+ansible_connection: winrm
+ansible_winrm_scheme: http
+ansible_winrm_transport: ntlm
+ansible_port: 5985
+ansible_winrm_server_cert_validation: ignore
+ansible_user: "{{ lookup('env', '***') }}"
+ansible_password: "{{ lookup('env', '***') }}"
+jira_url: "JIRA"
+cicd_home_path: "C:\\cicd-home"
+cicd_rocketsiebel_import_path: "C:\\RocketSiebel\\Application\\Import"
+cicd_rocketsiebel_export_adm_path: "C:\\RocketSiebel\\Export"
+cicd_rocketsiebel_siebelagent_path: "C:\\RocketSiebel\\SiebelAgent"                                                                   
+cicd_siebel_tools_path: "C:\\Siebel\\17.0.0.0.0\\Tools\\BIN"
+cicd_siebel_tools_client_root_path: "C:\\Siebel\\17.0.0.0.0\\Client"
+cicd_siebel_temp_path: "C:\\Siebel\\17.0.0.0.0\\Client\\TEMP"
+cicd_rocketsiebel_backup_db_path: "C:\\RocketSiebel\\Backup_DB"
+ 
+cicd_siebel_java_p: "C:\\Siebel\\Java_ip20"
+siebel_repo: "Siebel Repository"
+siebel_main: "MAIN"
+siebel_db_name: "SIEBEL_DB_NAME"
+siebel_db_host: "DB_SERVER"
+siebel_db_port: "1525"
+siebel_db_service_name: "SERVER_NAME"
+siebel_apply_db_source: "DB_NAME"
+siebel_tools_cicd_cfg: "C:\\Siebel\\fs\\CERT_UPG_IP20.cfg"
+siebel_tools_log: "C:\\Siebel\\17.0.0.0.0\\Tools\\LOG"
+siebel_client_log: "C:\\Siebel\\17.0.0.0.0\\Client\\LOG"
+siebel_java_p: "C:\\Siebel\\Java_ip20\\patch_wf_v.1.5.jar"
+siebel_java_p_1: "C:\\Siebel\\Java_ip20\\CheckWorkspace_v.1.3.jar"
+siebel_java_p_2: "C:\\Siebel\\Java_ip20\\ddlFix_v.1.13.jar"
+siebel_java_p_3: "C:\\Siebel\\Java_ip20\\ListRepoObjects_v.1.1.jar"
+siebel_java_p_4: "C:\\Siebel\\Java_ip20\\ListAdmObjects_v.1.5.jar"
+siebel_java_p_5: "C:\\Siebel\\Java_ip20\\CheckRepoProjects_v.1.0.jar"
+siebel_java_p_6: "C:\\Siebel\\Java_ip20\\ListManAdmObjects_v1.2.jar"
+siebel_ojdbc7: "C:\\app\\client32\\product\\19.0.0\\client_1\\jdbc\\lib\\ojdbc8.jar"
+rs_siebel_types_json: "C:\\RocketSiebel\\Application\\Import\\siebel-types-adm.json"
+path_java: "C:\\Program Files (x86)\\Java\\jre1.8.0_361\\bin\\java.exe"
+deliverworkspace_timeout: 300
+apply_ddl_timeout: 300
+number_dir_adm_rs_for_major_release: 0

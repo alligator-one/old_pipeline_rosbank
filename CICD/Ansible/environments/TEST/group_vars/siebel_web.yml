@@ -1,0 +1,60 @@
+# web_frontend
+# web_frontend_backup_age: "15d"
+web_restart_timeout: 120
+ 
+catalina_bin: "/opt/siebel/ses/applicationcontainer_external/bin/"
+ 
+#nrtnodejs_bin
+nrtnodejs_bin: "/opt/siebel/nrtnodejs/node_modules/pm2/bin"
+ 
+#web_frontend_dst_path
+react_frontend_dst_path_cc_react: "/opt/siebel/ses/applicationcontainer_external/webapps/cc-react"
+react_frontend_dst_path_outletx_react: "/opt/siebel/ses/applicationcontainer_external/webapps/outletx"
+react_frontend_dst_path_le_react: "/opt/siebel/ses/applicationcontainer_external/webapps/le-react"
+react_frontend_dst_path_unity_react: "/opt/siebel/ses/applicationcontainer_external/webapps/unity"
+react_frontend_dst_path_call_script_micro_react: "/opt/siebel/ses/applicationcontainer_external/webapps/call-script-micro"
+react_frontend_dst_path_microfronts_react: "/opt/siebel/ses/applicationcontainer_external/webapps/microfronts"
+react_frontend_dst_path_premium_portfolio_react: "/opt/siebel/ses/applicationcontainer_external/webapps/premium-portfolio"
+# web_frontend_dst_path_conf: "/opt/siebel/ses/applicationcontainer_external/conf"
+web_frontend_dst_path_files_web: "/opt/siebel/siebelwebroot"
+web_frontend_dst_path_root: "/opt/siebel/ses/applicationcontainer_external/webapps/ROOT"
+web_frontend_dst_path_search: "/opt/siebel/search"
+web_frontend_dst_path_siebelwebroot: "/opt/siebel/ses/applicationcontainer_external/siebelwebroot"
+# web_frontend_backup_dir: "/opt/siebel/cicd_web_backup"
+web_frontend_dst_path_nrtnodejs: "/opt/siebel/nrtnodejs"
+ 
+ 
+ 
+ 
+web_frontend_dirs:
+  # - src: "{{ deploy_base_dir }}/siebel-nrt/conf/"
+  #   dst: "{{web_frontend_dst_path_conf}}"
+  - src: "{{ deploy_base_dir }}/siebel-nrt/files_web/"
+    dst: "{{web_frontend_dst_path_files_web}}"
+  - src: "{{ deploy_base_dir }}/siebel-nrt/ROOT/"
+    dst: "{{web_frontend_dst_path_root}}"
+  - src: "{{ deploy_base_dir }}/siebel-nrt/search/"
+    dst: "{{web_frontend_dst_path_search}}"
+  - src: "{{ deploy_base_dir }}/siebel-nrt/siebelwebroot/"
+    dst: "{{web_frontend_dst_path_siebelwebroot}}"
+ 
+ 
+ 
+react_frontend_dirs:
+  - src: "{{ deploy_base_dir }}/siebel-nrt/react/cc-react/"
+    dst: "{{react_frontend_dst_path_cc_react}}"
+  - src: "{{ deploy_base_dir }}/siebel-nrt/react/outletx/"
+    dst: "{{react_frontend_dst_path_outletx_react}}"
+  - src: "{{ deploy_base_dir }}/siebel-nrt/react/le-react/"
+    dst: "{{react_frontend_dst_path_le_react}}"
+  - src: "{{ deploy_base_dir }}/siebel-nrt/react/unity/"
+    dst: "{{react_frontend_dst_path_unity_react}}"
+  - src: "{{ deploy_base_dir }}/siebel-nrt/react/call-script-micro/"
+    dst: "{{react_frontend_dst_path_call_script_micro_react}}"
+  - src: "{{ deploy_base_dir }}/siebel-nrt/react/microfronts/"
+    dst: "{{react_frontend_dst_path_microfronts_react}}"
+  - src: "{{ deploy_base_dir }}/siebel-nrt/react/premium-portfolio/"
+    dst: "{{react_frontend_dst_path_premium_portfolio_react}}"
+   
+siebel_files_transceiver_dirs:
+  - dst: "{{ web_frontend_dst_path_nrtnodejs }}"

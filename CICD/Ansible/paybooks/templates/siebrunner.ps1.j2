@@ -1,0 +1,1277 @@
+
+param(
+   [string]${user},
+   [string]${pass},
+   [string]${db-user},
+   [string]${db-pass},
+   [string]${dbstg-user},
+   [string]${dbstg-pass},
+   [string]${jira-user},
+   [string]${jira-pass},
+   [string]${patch},
+   [string]${env},
+   [string]${siebel_web_balancer_url},
+   [string]${siebel_web_balancer_port},
+   [string]${date_time},
+   [switch]${debug} = $false,
+   [switch]${backup-repo} = $false,
+   [switch]${backup-rocket-adm} = $false,
+   [switch]${lock-obj} = $false,
+   [switch]${create-ws} = $false,
+   [switch]${rename-wf} = $false,
+   [switch]${update-wf-db} = $false,
+   [switch]${import-sif} = $false,
+   [switch]${CheckWorkspace} = $false,
+   [switch]${execute-scripts-before-apply-ddl} = $false,
+   [switch]${apply-ddl} = $false,
+   [switch]${IncrementalTablePublish} = $false,
+   [switch]${CheckpointWorkspace} = $false,
+   [switch]${Deliverworkspace} = $false,
+   [switch]${PostDeliverworkspace} = $false,
+   [switch]${activate-wf} = $false,
+   [switch]${import-adm} = $false,
+   [switch]${backup-manual-adm} = $false,
+   [switch]${execute-scripts-after-apply-ddl} = $false
+  #[switch]${expire-wf} = $false,
+  #[switch]${compile-srf} = $false,
+)
+ 
+$cicd_home_path = "{{ cicd_home_path }}"
+$cicd_siebel_tools_path = "{{ cicd_siebel_tools_path }}"
+$path_java = "{{ path_java }}"
+$deliverworkspace_timeout = [int] "{{ deliverworkspace_timeout }}"
+$apply_ddl_timeout = [int] "{{ apply_ddl_timeout }}"
+$error_logs_path="${cicd_home_path}\${patch}\logs_error\${date_time}"
+$failed_stages_file = "${error_logs_path}\failed_stages.log"
+$unstable_stages_file = "${error_logs_path}\unstable_stages.log"
+$siebel_web_balancer_url = "{{ siebel_web_balancer_url}}"
+$siebel_web_balancer_port = "{{ siebel_web_balancer_port }}"
+$filepath = "${cicd_home_path}\${patch}\Dop_Object\${patch}_deploy_dop_objects.txt"
+ 
+[Environment]::SetEnvironmentVariable("SIEBEL_LOG_DIR", "${cicd_home_path}\${patch}\logs", [System.EnvironmentVariableTarget]::Process)
+[Environment]::SetEnvironmentVariable("SIEBEL_LOG_EVENTS", 4, [System.EnvironmentVariableTarget]::Process)
+ 
+$sqlLockObjects = @"
+UPDATE siebel.s_project
+    SET locked_flg = 'Y',
+        locked_by = (SELECT row_id FROM siebel.s_user WHERE login = '{{ siebel_user }}'),
+        locked_lang = 'RUS',
+        db_last_upd = sysdate,
+        db_last_upd_src = 'Autodeploy',
+        locked_date = sysdate
+        WHERE repository_id = (SELECT row_id FROM siebel.s_repository WHERE name = '{{ siebel_repo }}');
+COMMIT;
+DISCONNECT
+EXIT
+"@
+ 
+$sqlShowObjectsStatus = @"
+SELECT CASE locked_flg WHEN 'Y' THEN 'locked' ELSE 'unlocked' END AS LOCK_STATUS
+    ,SUM(CASE WHEN locked_by=(SELECT row_id FROM siebel.s_user WHERE login = '{{ siebel_user }}') THEN 1 ELSE 0 END) AS MY_LOCKED
+    ,SUM(CASE WHEN locked_by<>(SELECT row_id FROM siebel.s_user WHERE login = '{{ siebel_user }}') THEN 1 WHEN locked_by IS NULL THEN 1 ELSE 0 END) AS OTHER_LOCKED
+    FROM siebel.s_project
+    WHERE repository_id = (SELECT row_id FROM siebel.s_repository WHERE name = '{{ siebel_repo }}')
+    GROUP BY locked_flg;
+DISCONNECT
+EXIT
+"@
+ 
+$sqlCreateWorkspace = @"
+DECLARE
+WS_NAME CONSTANT VARCHAR2(200 CHAR):='dev_sadmin_{{ rocketsiebel_patch }}';
+PAR_WS_NAME CONSTANT VARCHAR2(200 CHAR):='MAIN';
+REP_ID SIEBEL.S_REPOSITORY.ROW_ID%type;
+CREATOR_ID SIEBEL.S_USER.ROW_ID%type;
+begin
+    select ROW_ID INTO CREATOR_ID from S_USER where Login = '{{ siebel_user }}';
+    select R.ROW_ID INTO REP_ID from SIEBEL.S_REPOSITORY R WHERE R.NAME='{{ siebel_repo }}';
+    siebel.WS_PKG.WS_CREATE(WS_NAME, PAR_WS_NAME, REP_ID, CREATOR_ID);
+end;
+/
+COMMIT;
+update s_workspace set status_cd='Edit-In-Progress', OBJ_LOCKED_FLG='Y', OBJ_LOCKED_BY='{{ siebel_user }}' where name ='MAIN';
+COMMIT;
+DISCONNECT
+EXIT
+"@
+ 
+$sqlCheckpointWorkspace = @"
+DECLARE
+WS_NAME CONSTANT VARCHAR2(200 CHAR):='dev_sadmin_{{ rocketsiebel_patch }}';
+REP_ID SIEBEL.S_REPOSITORY.ROW_ID%type;
+CREATOR_ID SIEBEL.S_USER.ROW_ID%type;
+WSID SIEBEL.S_WORKSPACE.ROW_ID%type;
+ 
+begin
+    select ROW_ID INTO CREATOR_ID from S_USER where Login = '{{ siebel_user }}';
+    select R.ROW_ID INTO REP_ID from SIEBEL.S_REPOSITORY R WHERE R.NAME='{{ siebel_repo }}';
+    SELECT ROW_ID INTO WSID FROM SIEBEL.S_WORKSPACE WHERE NAME = WS_NAME;
+    SIEBEL.WS_PKG.WS_VERSION_CREATE(WSID, REP_ID, CREATOR_ID);
+end;
+/
+commit;
+update s_workspace set status_cd='Checkpointed', OBJ_LOCKED_FLG='N', OBJ_LOCKED_BY='' where name ='MAIN';
+commit;
+DISCONNECT
+EXIT
+"@
+ 
+ 
+$sqlCheckDelivered = @"
+select STATUS_CD from SIEBEL.S_WORKSPACE
+where name = 'dev_sadmin_{{ rocketsiebel_patch }}';
+DISCONNECT
+EXIT
+"@
+ 
+#$sqlExpireWorkflow = @"
+#UPDATE S_WFR_PROC
+#   SET status_cd='NOT_IN_USE',
+#       last_upd=sysdate,
+#       db_last_upd=sysdate
+# WHERE status_cd in('COMPLETED','IN_PROGRESS')
+#       and repository_id=(select row_id from S_REPOSITORY where name='{{ siebel_repo }}')
+#       and proc_name in('{0}');
+#COMMIT;
+#DISCONNECT
+#EXIT
+#"@      
+ 
+$sqlExpireWorkflowStatus = @"
+SELECT proc_name,
+       status_cd,
+       last_upd,
+       db_last_upd
+FROM   s_wfr_proc
+WHERE  status_cd IN( 'COMPLETED', 'IN_PROGRESS' )
+       AND repository_id = (SELECT row_id
+                            FROM   s_repository
+                            WHERE  name = '{{ siebel_repo }}')
+       AND proc_name IN( '{0}' );
+ 
+DISCONNECT
+EXIT
+"@
+ 
+$xmlActivateWorkflow = @"
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:cus="http://siebel.com/CustomUI">
+   <soapenv:Header />
+   <soapenv:Body>
+      <cus:ActivateWF_Input>
+         <cus:activateAll>N</cus:activateAll>
+         <cus:flowSearchSpec>{0}</cus:flowSearchSpec>
+      </cus:ActivateWF_Input>
+   </soapenv:Body>
+</soapenv:Envelope>
+"@
+ 
+$sqlActivateWorkflowStatus = @"
+SELECT name,
+       created +3/24 as aktivate_dt,
+       deploy_status_cd
+FROM   siebel.s_wfa_dploy_def
+WHERE  name = '{0}'
+       AND deploy_status_cd = 'ACTIVE';
+"@
+ 
+function Get-SiebDevStatus {
+    $SiebDevProcess = tasklist /fi "username eq {{ ad_user_prefix }}\{{ ansible_user }}" /fi "ImageName eq siebdev.exe"
+            if ($SiebDevProcess -EQ "INFO: No tasks are running which match the specified criteria." ) {
+                        $ActiveStatus = $false
+            }
+            else{
+                        $ActiveStatus = $true
+            }
+    return $ActiveStatus
+}
+ 
+function Wait-SiebDev($TimeOut) {
+    $SiebDevStatus = Get-SiebDevStatus
+            if ($SiebDevStatus -EQ $false) {
+        Write-Host "The siebsev.exe process not started for user {{ ad_user_prefix }}\{{ ansible_user }}"
+        Exit 1
+    }
+    $RunningSeconds = 0
+    while($SiebDevStatus -EQ $true) {
+        if ($RunningSeconds -GE ($TimeOut * 60)) {
+            Write-Host "The operation took ${RunningSeconds} seconds and stopped by TimeOut."
+            Exit 1
+        }
+        Start-Sleep -Seconds 10
+        $RunningSeconds += 10
+        $SiebDevStatus = Get-SiebDevStatus
+    }
+            Write-Host "The operation took ${RunningSeconds} seconds"
+}
+ 
+function Get-TablesNames ($RepoPath) {
+    $sifObjects = Get-ChildItem -Path $RepoPath -Recurse -File -Filter "*.sif" | Select-String -InputObject {$_.FullName} -Pattern 'Table'
+    foreach ($sifObject in $sifObjects) {
+        $txtObject = Get-Content "${sifObject}"
+        $txtObject = $txtObject -replace '_1:M_','_1_M_' -replace '_M:1_','_M_1_'
+                        [xml]$xmlObject = Write-Output $txtObject
+        $TableName = $xmlObject.REPOSITORY.PROJECT.TABLE.NAME
+        if (-Not $TableName.StartsWith('EX')) {
+            $TableName
+        }
+    }
+}
+ 
+function Process-EXTables ($RepoPath, $ImportTableFile) {
+    Write-Output "Start Process-EXTables"
+    $sifObjects = Get-ChildItem -Path $RepoPath -Recurse -File -Filter "*.sif" | Select-String -InputObject {$_.FullName} -Pattern 'Table'
+    foreach ($sifObject in $sifObjects) {
+        $txtObject = Get-Content "${sifObject}"
+        $txtObject = $txtObject -replace '_1:M_','_1_M_' -replace '_M:1_','_M_1_'
+                        [xml]$xmlObject = Write-Output $txtObject
+        $TableName = $xmlObject.REPOSITORY.PROJECT.TABLE.NAME
+        if ($TableName.StartsWith('EX')) {
+            Write-Output "Find EXTable ""${TableName}"""
+            Write-Output "${TableName}:Update" | Out-File -FilePath "${ImportTableFile}" -Append -Encoding utf8
+        }
+    }
+}
+ 
+function Get-ddlObjects ($Tables, $ddlExportPath) {
+    foreach ($Table in $Tables) {
+        $ddlFile = Get-Content $ddlExportPath | Out-String
+        $NL = [System.Environment]::NewLine
+        $Objects = ($ddlFile -split "$NL$NL")
+        Write-Output "[DDL File]"
+        Write-Output "Version = 1"
+        foreach ($Object in $Objects) {
+            $Strings = ($Object -split "$NL")
+            foreach ($Line in $Strings) {
+                if ($Line -match "^Name = ${Table}$" -Or $Line -match "^Table = ${Table}$") {
+                    Write-Output "`n${Object}"
+                }
+            }
+        }
+    }
+}
+ 
+function Get-WorkflowNames ($RepoPath) {
+    $wfObjects = Get-ChildItem -Path $RepoPath -Recurse -File -Filter "*.sif" | Select-String -InputObject {$_.FullName} -Pattern 'Workflow Process'
+    foreach ($wfObject in $wfObjects) {
+        [xml]$xmlObject = Get-Content "${wfObject}"
+        $ProcessName = $xmlObject.REPOSITORY.PROJECT.WORKFLOW_PROCESS.PROCESS_NAME
+        $ProcessName
+    }
+}
+ 
+function Upload-JiraFile ($jiraTicket, $ScriptErrorLog, $URIPath, $headers) {
+    $wc = new-object System.Net.WebClient
+    $wc.Headers.Add("Authorization", $headers.Authorization)
+    $wc.Headers.Add("X-Atlassian-Token", "nocheck")
+    $result = $wc.UploadFile("${URIPath}/issue/$jiraTicket/attachments", $ScriptErrorLog)
+    [System.Text.Encoding]::UTF8.GetString($result)
+}
+ 
+function Find-SqlErrors ($SqlResult, $ExitCode) {
+            $SqlErrors = $SqlResult | Select-String '(SP2-\d{4,5}:|ORA-\d{5,6}:)' -CaseSensitive -Quiet
+           
+            if(($ExitCode -ne 0) -or $SqlErrors){
+                        return $true
+            }
+            else {
+                        return $false
+            }
+}
+ 
+function Process-SqlErrors ($SqlResult, $SqlErrors, $Stage, $Critical) {
+            Write-Output "==========SQL Result=========="
+            Write-Output $SqlResult
+            Write-Output "=============================="
+            Write-Output ""
+           
+            if($SqlErrors){
+                        Write-Output "Stage ${Stage} > Found SQL, OS or SP2 error!!!"
+                        mkdir "${error_logs_path}\${Stage}" -ErrorAction Ignore > $null
+                        if($Critical) {
+                                    Write-Output ("Error in ${Stage}!")>>"${failed_stages_file}"
+                                    exit 1
+                        }
+                        else {
+                            if($SqlScripts_Variable){
+                                        Write-Output ("-------Sart of Script ${namefile}------") >> "${error_logs_path}\${Stage}\$Stage_sql_result.log"
+                                               $SqlResult >> "${error_logs_path}\${Stage}\$Stage_sql_result.log"
+                                        Write-Output ("-------End of Script ${namefile}------") >> "${error_logs_path}\${Stage}\$Stage_sql_result.log"
+                                               Write-Output "" >> "${error_logs_path}\${Stage}\$Stage_sql_result.log"
+                                        $SqlResult >> "${error_logs_path}\${Stage}\sql_result_${namefile}.log"
+                                               Compress-Archive -Path "${error_logs_path}\${Stage}\sql_result_${namefile}.log", "${textfile}" -DestinationPath "${error_logs_path}\${Stage}\sql_result_${namefile}.log.zip"
+                                               $ScriptErrorLog = "${error_logs_path}\${Stage}\sql_result_${namefile}.log.zip"
+                                               $jiraTicketTemp = Select-String -Path "$filepath" -Pattern "(.*)$task_path_db_scripts/$namefile"
+                                               if($jiraTicketTemp){
+                                                   $jiraTicket = (Select-String -Path "$filepath" -Pattern "(.*)$task_path_db_scripts/$namefile").Matches.Groups[0].Value -Split(":") | Select-Object -First 1
+                                                    $URIPath = "{{ jira_url }}/rest/api/2"
+                    $headers = @{'Authorization' = "Basic " + [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("$(${jira-user}):$(${jira-pass})"))}
+                                                   $result_Id_0 = (Upload-JiraFile $jiraTicket $ScriptErrorLog $URIPath $headers) -Split("/attachment/")
+                    $result_Id = $result_Id_0 -Split('","') | Select-Object -First 2 | Select-Object -Skip 1
+                                                   $ScriptErrorLog_1 = (Get-Item $ScriptErrorLog).Name
+                                                   $body = '{"update": {"comment": [{"add": {"body": "Patch ' + ${patch} + '. Installation object ' + $task_path_db_scripts+'/'+${namefile} + ' is failed. Log with error: [' + ${ScriptErrorLog_1} + '|https://jirahq.rosbank.rus.socgen:8443/secure/attachment/' + $result_Id+'/'+${ScriptErrorLog_1} + ']"}}]}}'
+                                                   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12                   
+                                                   Invoke-RestMethod -Uri "$URIPath/issue/$jiraTicket" -TimeoutSec 240 -Method Put -ContentType 'application/json' -Headers $headers -Body $body
+                                } else {
+                                                   Write-Output "No Jira Task for object $task_path_db_scripts/${namefile}" >> "${error_logs_path}\${Stage}\sql_result_no_jira_task_${namefile}.log"
+                                        }
+                                               New-Item -ItemType Directory -Force -Path "$path_db_scripts\Error"
+                                Move-item -path "$textfile" -destination "$path_db_scripts\Error"
+                                               Write-Output "<tr><td>$jiraTicket</td><td colspan='2' style='text-align:left;'>$task_path_db_scripts/${namefile}</td></tr>" | Out-File -FilePath "${error_logs_path}\${Stage}\${Stage}_error_obj.log" -Append -Encoding utf8
+                                               Write-Output "$jiraTicket" | Out-File -FilePath "${error_logs_path}\${Stage}\${Stage}_error_dop_task.log" -Append -Encoding utf8
+            }
+                                    Write-Output ("Error in ${Stage}!")>>"${unstable_stages_file}"
+                        }
+            }
+            else {
+                        Write-Output "SQL, OS or SP2 errors not found"
+                        New-Item -ItemType Directory -Force -Path "${cicd_home_path}\${patch}\logs_all\${date_time}\$Stage"
+                        $SqlResult >> "${cicd_home_path}\${patch}\logs_all\${date_time}\$Stage\$Stage_sql_result.log"
+                        Write-Output "" >> "${cicd_home_path}\${patch}\logs_all\${date_time}\$Stage\$Stage_sql_result.log"
+                        if($SqlScripts_Variable){
+                             Write-Output "===================== START Script $namefile =====================">>"$path_log_db_scripts\$dirfile\Done\$namefile.log"
+                     $sql_result>>"$path_log_db_scripts\$dirfile\Done\$namefile.log"
+                     Write-Output "===================== END Script $namefile =====================">>"$path_log_db_scripts\$dirfile\Done\$namefile.log"
+                             #$SqlResult >> "${cicd_home_path}\${patch}\logs_all\${date_time}\$Stage\${Stage}_out.log"
+                             $jiraTicketTemp = Select-String -Path "$filepath" -Pattern "(.*)$task_path_db_scripts/$namefile"
+                             if($jiraTicketTemp){
+                                 $jiraTicket = (Select-String -Path "$filepath" -Pattern "(.*)$task_path_db_scripts/$namefile").Matches.Groups[0].Value -Split(":") | Select-Object -First 1
+                             } else {
+                                 Write-Output "No Jira Task for object $task_path_db_scripts/${namefile}" >> "${cicd_home_path}\${patch}\logs_all\${date_time}\$Stage\sql_result_no_jira_task_${namefile}.log"
+                             }
+                             Write-Output "<tr><td>$jiraTicket</td><td colspan='2' style='text-align:left;'>$task_path_db_scripts/${namefile}</td></tr>" | Out-File -FilePath "${cicd_home_path}\${patch}\logs_all\${date_time}\$Stage\${Stage}_success_obj.log" -Append -Encoding utf8
+                     Write-Output "$jiraTicket" | Out-File -FilePath "${cicd_home_path}\${patch}\logs_all\${date_time}\$Stage\${Stage}_success_dop_task.log" -Append -Encoding utf8
+                                    Move-item -path "$textfile" -destination "$path_db_scripts\Done"
+        }
+            }
+}
+ 
+function SqlScripts-Execution {
+            $textfiles = (get-childitem -Path "$path_db_scripts\*" -File -Filter "*.sql" -exclude Done | sort-object).FullName
+    ForEach ($textfile in $textfiles) {
+         $namefile = (Get-Item "$textfile").Name
+                 $SQL_TEXT = Get-content "$textfile" -Raw -Encoding UTF8
+ 
+$sqlScriptDb = @"
+whenever sqlerror exit 7;
+whenever oserror exit 8;
+set sqlblanklines on;
+set timing on;
+ALTER SESSION SET ddl_lock_timeout=300;
+$SQL_TEXT
+COMMIT;
+DISCONNECT
+EXIT
+"@
+                        $SQLTmpFile = "$path_db_scripts\Temp\$namefile"
+         $Utf8NoBomEncoding = New-Object System.Text.UTF8Encoding $False
+         [System.IO.File]::WriteAllLines($SQLTmpFile, $sqlScriptDb, $Utf8NoBomEncoding)
+                        $env:NLS_LANG='.AL32UTF8'
+                        $DB = "{{ siebel_db_name }}"
+         $args = ("sqlplus {0}/{1}@{2} @{3}" -f ${db-user}, ${db-pass}, $DB, """" + $SQLTmpFile + """")
+                        $args1 = ("cmd /c '" + $args + "'")
+         $sql_result = Invoke-Expression $args1
+                 Write-Output "===================== START Script $namefile =====================">>"$path_log_db_scripts\$log_db_scripts.log"
+                 $sql_result = Invoke-Expression $args1
+                        #$sql_result>>"$path_log_db_scripts\$log_db_scripts.log"
+                 Write-Output "===================== END Script $namefile =====================">>"$path_log_db_scripts\$log_db_scripts.log"
+                        Write-Output "">>"$path_log_db_scripts\$log_db_scripts.log"
+         $sql_errors = Find-SqlErrors -SqlResult ${sql_result} -ExitCode $LASTEXITCODE
+                 Process-SqlErrors -SqlResult ${sql_result} -SqlErrors ${sql_errors} -Stage $execute_scripts -Critical $false
+    }
+}
+ 
+function SqlScripts-Variable {
+    mkdir "${cicd_home_path}\${patch}\logs_all\${date_time}\$SqlScripts_Variable\$dirfile"
+            mkdir "${cicd_home_path}\${patch}\logs_all\${date_time}\$SqlScripts_Variable\$dirfile\Done"
+            $path_log_db_scripts = "${cicd_home_path}\${patch}\logs_all\${date_time}\$SqlScripts_Variable"
+            $path_SqlScripts_Variable = "${cicd_home_path}\${patch}\DB\$SqlScripts_Variable"
+            $log_db_scripts = "$SqlScripts_Variable"
+            if(Test-Path -path "$path_SqlScripts_Variable\$dirfile\BACKUP\*.sql") {
+              mkdir "${cicd_home_path}\${patch}\DB\$SqlScripts_Variable\$dirfile\BACKUP\Done"
+              mkdir "${cicd_home_path}\${patch}\DB\$SqlScripts_Variable\$dirfile\BACKUP\Temp"
+              $path_db_scripts ="$path_SqlScripts_Variable\$dirfile\BACKUP"
+              $task_path_db_scripts ="DB/$DB_Scripts_Variable/$dirfile/BACKUP"
+              SqlScripts-Execution
+            }
+            else {
+              Write-Output "$execute_scripts > No sql scripts in the directory $path_SqlScripts_Variable\$dirfile\BACKUP"
+            }
+            if (Test-Path -path "$path_SqlScripts_Variable\$dirfile\RUN\*.sql") {
+              mkdir "${cicd_home_path}\${patch}\DB\$SqlScripts_Variable\$dirfile\RUN\Done"
+              mkdir "${cicd_home_path}\${patch}\DB\$SqlScripts_Variable\$dirfile\RUN\Temp"
+              $path_db_scripts ="$path_SqlScripts_Variable\$dirfile\RUN"
+              $task_path_db_scripts ="DB/$DB_Scripts_Variable/$dirfile/RUN"
+              SqlScripts-Execution
+            }
+            else {
+              Write-Output "$execute_scripts > No sql scripts in the directory $path_SqlScripts_Variable\$dirfile\RUN"
+            }
+}
+ 
+function SqlScripts-Execution-Variable {
+    if (${execute_scripts} -eq "before_apply_ddl") {
+        $SqlScripts_Variable = "before_apply_ddl"
+                        $DB_Scripts_Variable = "BEFORE_APPLY"
+                        SqlScripts-Variable
+    }
+            if (${execute_scripts} -eq "after_apply_ddl") {
+                $SqlScripts_Variable = "after_apply_ddl"
+                        $DB_Scripts_Variable = "AFTER_APPLY"
+                        SqlScripts-Variable
+    }
+}
+ 
+function No-Jira-Task {
+            $jiraTicket = "No Jira Task"
+    #Get-Childitem -Path "${cicd_home_path}\${patch}\repo" -Recurse -Force -File -Name | Split-Path
+    $repo_path_1 = Get-Childitem -Path "$repo_path" -Recurse -Force -File -Name
+    ForEach ($repo_path_2 in $repo_path_1) {
+                 Add-Type -AssemblyName System.Web
+         $A = [System.Web.HttpUtility]::UrlDecode("$repo_path_2")
+         $B = $A.Split("_")[-1]
+         $C = ($A -replace "_$B",'').Replace('\',"/")
+                 Write-Output "<tr><td>$jiraTicket</td><td colspan='2' style='text-align:left;'>/$repo_path_3/$C</td></tr>" | Out-File -FilePath "$CheckStage_log" -Append -Encoding utf8
+   }
+}
+ 
+function Import-Adm-Get-Name-Obj {
+    ForEach ($jiraTicketTemp_2 in $jiraTicketTemp_1) {
+         $jiraObject = $jiraTicketTemp_2 -split ":" | Select -Skip 1
+                 $jiraTicketTemp_8 = ($jiraTicketTemp_2 -split ':')[0]
+         #$jiraTicketTemp_8 = $jiraTicketTemp_2 -split ":$jiraObject"
+         $jiraTicket = Write-Output ("$jiraTicketTemp_8").Trim()
+         Write-Output "<tr><td>$jiraTicket</td><td colspan='2' style='text-align:left;'>$jiraObject</td></tr>" | Out-File -FilePath "$CheckStage_log" -Append -Encoding utf8
+                 Write-Output "$jiraTicket" | Out-File -FilePath "${cicd_home_path}\${patch}\logs_all\${date_time}\import-adm\import_adm_success_rs_task.log" -Append -Encoding utf8
+    }
+}
+ 
+if (${backup-repo}) {
+    # Critical - проверять наличие файла "${objects_repo_export}"
+            $backup_repo_path = "${cicd_home_path}\${patch}\objects_repo_backup"
+            $objects_repo_export = "${cicd_home_path}\${patch}\logs_all\${date_time}\Backup-repo\objects_export.txt"
+            $objects_export_log = "${cicd_home_path}\${patch}\logs_all\${date_time}\Backup-repo\objects_export.log"
+            $import_sif_cfg = "{{ siebel_tools_cicd_cfg }}"
+            mkdir "${cicd_home_path}\${patch}\logs_all\${date_time}\Backup-repo"
+    & java -jar {{ siebel_java_p_3 }} "${cicd_home_path}\${patch}\repo" "${backup_repo_path}"
+    mv "${cicd_home_path}\${patch}\repo\objects_export.txt" "${cicd_home_path}\${patch}\logs_all\${date_time}\Backup-repo\"
+            mv "${cicd_home_path}\${patch}\repo\objects_list.txt" "${cicd_home_path}\${patch}\logs_all\${date_time}\Backup-repo\"
+    if(!(Test-Path -path "${objects_repo_export}")){
+      mkdir "${cicd_home_path}\${patch}\logs_error\${date_time}\Backup-repo"
+      Write-Output "backup-repo > Error! File ${objects_repo_export} doesn't exists!"
+      Write-Output ("Error in backup-repo!")>>"${failed_stages_file}"
+      exit 1
+    }
+            else {
+              & "${cicd_siebel_tools_path}\siebdev.exe" /c "${import_sif_cfg}" /d "{{ siebel_db_name }}" /u ${user} /p ${pass} /ws {{ siebel_main }} /batchexport "{{ siebel_repo }}" "${objects_repo_export}" "${objects_export_log}"
+              Wait-SiebDev -TimeOut 100
+              mv "${cicd_home_path}\${patch}\logs\siebdev.log" "${cicd_home_path}\${patch}\logs_all\${date_time}\Backup-repo\"
+            }
+}
+ 
+if (${backup-rocket-adm}) {
+    # Critical - проверять наличие файла "${objects_rocket_adm_export}"
+            $backup_rocket_adm_path = "${cicd_home_path}\${patch}\objects_rocket_adm_backup"
+            $export_adm_jar_path = "{{ cicd_rocketsiebel_export_adm_path }}"
+            $export_siebelagent_path = "{{ cicd_rocketsiebel_siebelagent_path }}"
+            $export_rocket_adm_jar = "${export_siebelagent_path}\Lib\siebel-export-cli-adm.jar"
+            $export_adm_log = "${export_adm_jar_path}\logs\siebel-com-export-cli.log"
+            $list_adm_objects_log = "${export_siebelagent_path}\ExportSessions\adm-export\ListAdmObjects.log"
+            rm ${export_adm_log} -ErrorAction Ignore
+    rm "${cicd_home_path}\${patch}\logs\SiebelDataServer*" -ErrorAction Ignore
+            mkdir "${cicd_home_path}\${patch}\logs_all\${date_time}\Backup-rocket-adm"
+ 
+    & "${path_java}" -classpath "{{ siebel_ojdbc7 }};{{ siebel_java_p_4 }};\" rtsegelnik.ListAdmObjects "${cicd_home_path}\${patch}\adm" "${export_siebelagent_path}\ExportSessions\adm-export\export_queue.tmp" {{ siebel_db_name }} ${db-user} ${db-pass}
+   
+            $adm_objects_log_result = Select-String -Path "${list_adm_objects_log}" -Pattern 'Count files to backup = 0' -CaseSensitive
+   
+    if ($adm_objects_log_result) {
+        Write-Output "Count files to backup = 0"
+                        mv "${list_adm_objects_log}" "${cicd_home_path}\${patch}\logs_all\${date_time}\Backup-rocket-adm\"
+                exit 0
+            }
+            if( !(Test-Path -path "${export_siebelagent_path}\ExportSessions\adm-export\export_queue.tmp") ){
+      mkdir "${cicd_home_path}\${patch}\logs_error\${date_time}\Backup-rocket-adm"
+      Write-Output "backup-rocket-adm > Error! File ${export_siebelagent_path}\ExportSessions\adm-export\export_queue.tmp doesn't exists!"
+      Write-Output ("Error in backup-rocket-adm!")>>"${failed_stages_file}"
+      exit 1
+    }
+            else {
+              # set-variable -name TNS_ADMIN -value "${export_siebelagent_path}\Conf\env\{$env}"
+              # & "${path_java}" -jar ${export_rocket_adm_jar} adm-export "{$env}" "01/01/2018 00:00:00" ${user} ${pass} "Siebel Repository" "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=rsbt-dbtgenora-scan.trosbank.trus.tsocgen)(PORT=1525))(CONNECT_DATA=(SERVER=dedicated)(SERVICE_NAME=SBLT22)))"
+              Set-Location $export_adm_jar_path
+              & "$export_adm_jar_path\export-adm-rocket.bat"
+              if( !(Test-Path -path "${export_siebelagent_path}\ExportSessions\adm-export\adm") ){
+                mkdir "${cicd_home_path}\${patch}\logs_error\${date_time}\Backup-rocket-adm"
+        Write-Output "backup-rocket-adm > Error! Directory ${export_siebelagent_path}\ExportSessions\adm-export\adm doesn't exists!"
+        Write-Output ("Error in backup-rocket-adm!")>>"${failed_stages_file}"
+        exit 1
+              }
+              else {
+                mv "${export_siebelagent_path}\ExportSessions\adm-export\export_queue.tmp" "${cicd_home_path}\${patch}\logs_all\${date_time}\Backup-rocket-adm\"
+                mv "${export_siebelagent_path}\ExportSessions\adm-export\export_queue.tmp.loc" "${cicd_home_path}\${patch}\logs_all\${date_time}\Backup-rocket-adm\"
+                mv "${export_adm_jar_path}\logs\siebel-com-export-cli.log" "${cicd_home_path}\${patch}\logs_all\${date_time}\Backup-rocket-adm\"
+        mv "${cicd_home_path}\${patch}\logs\SiebelDataServer*" "${cicd_home_path}\${patch}\logs_all\${date_time}\Backup-rocket-adm\"
+                        mv "${list_adm_objects_log}" "${cicd_home_path}\${patch}\logs_all\${date_time}\Backup-rocket-adm\"
+                mv "${export_siebelagent_path}\ExportSessions\adm-export\adm" "$backup_rocket_adm_path\"
+              }
+            }
+}          
+           
+if (${create-ws}) {
+    $sql_result = Write-Output "${sqlCreateWorkspace}" | sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }}
+    $sql_errors = Find-SqlErrors -SqlResult ${sql_result} -ExitCode $LASTEXITCODE
+ 
+    if (${debug}) {
+      Write-Output "===================== START DEBUG MESSAGES ====================="
+      Write-Output "${sqlCreateWorkspace} | sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }}"
+      Write-Output "===================== END DEBUG MESSAGES ====================="
+    }
+ 
+    Process-SqlErrors -SqlResult ${sql_result} -SqlErrors ${sql_errors} -Stage "create-ws" -Critical $true
+}
+ 
+if (${rename-wf}) {
+    # Critical - проверять наличие файла "${rename_wf_path}\UpdateWF.sql"
+    $rename_wf_path = "${cicd_home_path}\${patch}\objects_wf"
+    & java -jar {{ siebel_java_p }} "${rename_wf_path}" -RENAME -SQL
+ 
+    if(!(Test-Path -path "${rename_wf_path}\UpdateWF.sql")){
+      mkdir "${cicd_home_path}\${patch}\logs_error\${date_time}\rename-wf"
+      Write-Output "rename-wf > Error! File ${rename_wf_path}\UpdateWF.sql doesn't exists!"
+      Write-Output ("Error in rename-wf!")>>"${failed_stages_file}"
+      exit 1
+    }
+ 
+    if (${debug}) {
+      Write-Output "===================== START DEBUG MESSAGES ====================="
+      Get-Content -Path "${rename_wf_path}\UpdateWF.sql"
+      Write-Output "===================== END DEBUG MESSAGES ====================="
+    }
+}
+ 
+if (${update-wf-db}) {
+    # Critical - при ошибках сразу завершаем пайплайн
+    $rename_wf_path = "${cicd_home_path}\${patch}\objects_wf"
+    #& sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }} "@${rename_wf_path}UpdateWF.sql"
+ 
+    $SQL_TEXT = Get-Content "${rename_wf_path}\UpdateWF.sql" -Raw
+ 
+$sqlUpdateWfDb = @"
+whenever sqlerror exit 7;
+whenever oserror exit 8;
+$SQL_TEXT
+"@
+ 
+    $sql_result = Write-Output "${sqlUpdateWfDb}" | sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }}
+    $sql_errors = Find-SqlErrors -SqlResult ${sql_result} -ExitCode $LASTEXITCODE
+   
+    if (${debug}) {
+      Write-Output "===================== START DEBUG MESSAGES ====================="
+      Write-Output "${sqlUpdateWfDb} | sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }}"
+      Write-Output "===================== END DEBUG MESSAGES ====================="
+    }
+ 
+    Process-SqlErrors -SqlResult ${sql_result} -SqlErrors ${sql_errors} -Stage "update-wf-db" -Critical $true
+}
+ 
+if (${lock-obj}) {
+            $CheckRepoProjects_log = "${cicd_home_path}\${patch}\logs\CheckRepoProjects.log"
+            & "${path_java}" -classpath "{{ siebel_ojdbc7 }};{{ siebel_java_p_5 }};\" rtsegelnik.CheckRepoProjects "${cicd_home_path}\${patch}\repo" "${CheckRepoProjects_log}" {{ siebel_db_name }} ${db-user} ${db-pass}
+            # Critical - при ошибках сразу завершаем пайплайн
+    $sql_result = Write-Output "${sqlLockObjects}" | sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }}
+    $sql_errors = Find-SqlErrors -SqlResult ${sql_result} -ExitCode $LASTEXITCODE
+ 
+    if (${debug}) {
+      Write-Output "===================== START DEBUG MESSAGES ====================="
+      Write-Output "${sqlShowObjectsStatus}" | sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }}
+      Write-Output "===================== END DEBUG MESSAGES ====================="
+    }
+ 
+    Process-SqlErrors -SqlResult ${sql_result} -SqlErrors ${sql_errors} -Stage "lock-obj" -Critical $true
+}
+ 
+#if (${expire-wf}) {
+#    $expire_wf_repo_path = "${cicd_home_path}\${patch}\repo\"
+#    $WorkflowNames = Get-WorkflowNames -RepoPath $expire_wf_repo_path
+#    foreach ($WorkflowName in $WorkflowNames) {
+#        Write-Output (${sqlExpireWorkflow} -f "${WorkflowName}") | sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }}
+#        if (${debug}) {
+#            Write-Output ("WorkflowName: ${WorkflowName}")
+#            Write-Output "(${sqlExpireWorkflowStatus} -f ${WorkflowName} | sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }}"
+#        }
+#    }
+#}
+ 
+if (${import-sif}) {
+    # сделать unstable
+    mkdir "${cicd_home_path}\${patch}\logs_all\${date_time}\import-sif"
+            $CheckRepoProjects_log = "${cicd_home_path}\${patch}\logs\CheckRepoProjects.log"
+    $import_sif_cfg = "{{ siebel_tools_cicd_cfg }}"
+    $import_sif_path = "${cicd_home_path}\${patch}\objects_sif"
+    $import_sif_log = "${cicd_home_path}\${patch}\logs\import.log"
+            Remove-Item "{{ siebel_tools_log }}\*.*" -ErrorAction Ignore
+    Remove-Item "${import_sif_log}" -ErrorAction Ignore
+    & "${cicd_siebel_tools_path}\siebdev.exe" /c "${import_sif_cfg}" /d "{{ siebel_db_name }}" /u ${user} /p ${pass} /ws dev_sadmin_{{ rocketsiebel_patch }} /batchimport "{{ siebel_repo }}" overwrite  "${import_sif_path}" "${import_sif_log}"
+    Wait-SiebDev -TimeOut 100
+    if (${debug}) {
+      Write-Output "===================== START DEBUG MESSAGES ====================="
+      Get-Content -Path ${import_sif_log}
+      Write-Output "===================== END DEBUG MESSAGES ====================="
+    }
+ 
+    $import_sif_result = Select-String -Path "${import_sif_log}" -Pattern 'Failed Imports:' -CaseSensitive
+    $import_sif_result = $import_sif_result.Line.Split(': ')
+    $import_sif_failed = [int] $import_sif_result[$import_sif_result.Lenghth-1]
+ 
+    if ($import_sif_failed -ne 0) {
+        mkdir "${cicd_home_path}\${patch}\logs_error\${date_time}\import-sif"
+        cp "${import_sif_log}" "${cicd_home_path}\${patch}\logs_error\${date_time}\import-sif\"
+        Write-Output "IMPORT-SIF -> Failed Imports: ${import_sif_failed}"
+        Write-Output ("Error in import-sif!")>>"${failed_stages_file}"
+                        exit 1
+    }
+ 
+    mv "${import_sif_log}" "${cicd_home_path}\${patch}\logs_all\${date_time}\import-sif\"
+    mv "${cicd_home_path}\${patch}\logs\siebdev.log" "${cicd_home_path}\${patch}\logs_all\${date_time}\import-sif\"
+            mv "${CheckRepoProjects_log}" "${cicd_home_path}\${patch}\logs_all\${date_time}\import-sif\"
+}
+ 
+if (${CheckWorkspace}) {
+    mkdir "${cicd_home_path}\${patch}\logs_all\${date_time}\CheckWorkspace"
+    Remove-Item "${cicd_home_path}\${patch}\objects_sif\*-ALL.txt" -ErrorAction Ignore
+    Remove-Item "${cicd_home_path}\${patch}\objects_sif\*-LOADED.txt" -ErrorAction Ignore
+    Remove-Item "${cicd_home_path}\${patch}\objects_sif\*-MISSING.txt" -ErrorAction Ignore
+    $import_sif_path = "${cicd_home_path}\${patch}\objects_sif\"
+    & "${path_java}" -classpath "{{ siebel_ojdbc7 }};{{ siebel_java_p_1 }};\" rtsegelnik.CheckWorkspace "{{ siebel_db_name }}" ${db-user} ${db-pass} dev_sadmin_{{ rocketsiebel_patch }} 60 "$import_sif_path" -RENAME
+    cp "${cicd_home_path}\${patch}\objects_sif\*-ALL.txt" "${cicd_home_path}\${patch}\logs_all\${date_time}\CheckWorkspace\"
+    cp "${cicd_home_path}\${patch}\objects_sif\*-LOADED.txt" "${cicd_home_path}\${patch}\logs_all\${date_time}\CheckWorkspace\"
+    cp "${cicd_home_path}\${patch}\objects_sif\*-MISSING.txt" "${cicd_home_path}\${patch}\logs_all\${date_time}\CheckWorkspace\"
+    if(Test-Path -path "${cicd_home_path}\${patch}\objects_sif\*-MISSING.txt"){
+      mkdir "${cicd_home_path}\${patch}\logs_error\${date_time}\CheckWorkspace"
+      Write-Output "CheckWorkspace > Error! File with missing objects exists!"
+      cp "${cicd_home_path}\${patch}\objects_sif\*-MISSING.txt" "${cicd_home_path}\${patch}\logs_error\${date_time}\CheckWorkspace\"
+      Write-Output ("Error in CheckWorkspace!")>>"${unstable_stages_file}"
+    }
+}
+ 
+if (${execute-scripts-before-apply-ddl}) {
+    $execute_scripts = "before_apply_ddl"
+    mkdir "${cicd_home_path}\${patch}\logs_all\${date_time}\before_apply_ddl"
+    $dirfiles = (get-childitem -Path "${cicd_home_path}\${patch}\DB\before_apply_ddl" -Directory).Name
+    ForEach ($dirfile in $dirfiles) {
+         #Write-Output $dirfile
+         if ($dirfile -eq 'SIEBEL') {
+                   SqlScripts-Execution-Variable
+                 }
+    }
+    ForEach ($dirfile in $dirfiles) {
+                 if ($dirfile -eq 'SIEBEL_STG') {
+                   ${db-user} = ${dbstg-user}
+                           ${db-pass} = ${dbstg-pass}
+                           SqlScripts-Execution-Variable
+                }
+    }
+    $dirfiles = (get-childitem -Path "${cicd_home_path}\${patch}\DB\before_apply_ddl" -Directory -Exclude SIEBEL,SIEBEL_STG).Name
+    ForEach ($dirfile in $dirfiles) {
+         [string]${db-user} = "$dirfile"
+                 ${db-user} += "-user"
+                 [string]${db-pass} = "$dirfile"
+                 ${db-pass} += "-pass"
+                 ${db-user} = Get-Variable -Name "${db-user}" -ValueOnly
+         ${db-pass} = Get-Variable -Name "${db-pass}" -ValueOnly
+                 SqlScripts-Execution-Variable
+    }
+}
+ 
+if (${apply-ddl}) {
+    mkdir "${cicd_home_path}\${patch}\logs_all\${date_time}\apply-ddl\1"
+    $apply_ddl_repo_path = "${cicd_home_path}\${patch}\repo\"
+    $apply_ddl_export_log = "${cicd_home_path}\${patch}\logs\apply-ddl-export.log"
+    $apply_ddl_export_file = "${cicd_home_path}\${patch}\objects_ddl\export.ddl"
+            $apply_ddl_export_table = "${cicd_home_path}\${patch}\objects_ddl\table.txt"
+    $apply_ddl_import_log = "${cicd_home_path}\${patch}\logs\apply-ddl-import.log"
+    $apply_ddl_import_file = "${cicd_home_path}\${patch}\objects_ddl\import.sql"
+            $apply_ddl_table_file = "${cicd_home_path}\${patch}\objects_ddl\table.sql"
+            $apply_ddl_index_file = "${cicd_home_path}\${patch}\objects_ddl\index.sql"
+            $import_table_file = "${cicd_home_path}\${patch}\logs\apply-ddl-import_TableSchema.txt"
+    Remove-Item "${cicd_home_path}\${patch}\logs\*.*" -ErrorAction Ignore
+            Remove-Item "${cicd_home_path}\${patch}\objects_ddl\*.*" -ErrorAction Ignore
+            Remove-Item "{{ siebel_tools_log }}\*.*" -ErrorAction Ignore
+ 
+            $TableNames = Get-TablesNames -RepoPath $apply_ddl_repo_path
+            Add-Content ${apply_ddl_export_table} $TableNames
+ 
+    if ((Get-ChildItem -Path "${apply_ddl_export_table}").Length -eq 0) {
+        Process-EXTables -RepoPath $apply_ddl_repo_path -ImportTableFile $import_table_file
+                        exit 0
+            }
+            else {
+    $TableNames | & ${cicd_siebel_tools_path}\ddldict.exe /u ${user} /p ${pass} /c {{ siebel_apply_db_source }} /d SIEBEL /f ${apply_ddl_export_file} /e n /k "N" /a y /l ${apply_ddl_export_log} /n "{{ siebel_repo }}" /t dcier
+    if (${debug}) {
+        Write-Output "===================== START DEBUG MESSAGES ====================="
+        Write-Output "apply-ddl > apply_ddl_export_log content:"
+        Get-Content -Path ${apply_ddl_export_log}
+        Write-Output "===================== END DEBUG MESSAGES ====================="
+    }
+ 
+    $ddl_export_error = Select-String -Path "$apply_ddl_export_log" -Pattern 'Error in MainFunction', 'DDLDICT-ERR'
+    if ($ddl_export_error){
+      Write-Output "Error Export DDL > !!! Error Export DDL !!!"
+              exit 1
+    }
+ 
+    & ${cicd_siebel_tools_path}\ddlimp.exe /u ${db-user} /p ${db-pass} /c {{ siebel_db_name }} /F ${apply_ddl_export_file} /g SSE_ROLE /Q ${apply_ddl_import_file} /e n /b SIEBEL_DATA /x SIEBEL_INDX /r Y /w Y /s N /l ${apply_ddl_import_log}
+   
+            if (${debug}) {
+      Write-Output "===================== START DEBUG MESSAGES ====================="
+      Write-Output "apply-ddl > apply_ddl_import_file content:"
+      Get-Content -Path ${apply_ddl_import_file}
+      Write-Output "===================== END DEBUG MESSAGES ====================="
+    }
+           
+            $ddl_import_error = Select-String -Path "$apply_ddl_import_log" -Pattern 'Error in MainFunction', 'DDLDICT-ERR'
+    if ($ddl_import_error){
+      Write-Output "Error Import DDL > !!! Error Import DDL !!!"
+              exit 1
+    }
+           
+            $apply_ddl_total_errors = Select-String -Path "$apply_ddl_import_log" -Pattern 'TOTAL ERRORS' -CaseSensitive
+    if($apply_ddl_total_errors) {
+      $apply_ddl_total_errors = $apply_ddl_total_errors.Line.Split(': ')
+      $apply_ddl_total_errors_count = [int] $apply_ddl_total_errors[$apply_ddl_total_errors.Lenghth-1]
+      if ($apply_ddl_total_errors_count -ne 0) {
+        mkdir "${cicd_home_path}\${patch}\logs_error\${date_time}\apply-ddl" -ErrorAction Ignore
+        cp "${cicd_home_path}\${patch}\logs_all\${date_time}\apply-ddl\*" "${cicd_home_path}\${patch}\logs_error\${date_time}\apply-ddl\" -recurse -ErrorAction Ignore
+        Write-Output "apply-ddl > Error! TOTAL ERRORS: ${generate_ddl_total_errors_count}"
+        Write-Output ("Error in apply-ddl!")>>"${unstable_stages_file}"
+                        exit 1
+      }
+    }
+    else {
+      mkdir "${cicd_home_path}\${patch}\logs_error\${date_time}\apply-ddl" -ErrorAction Ignore
+      cp "${cicd_home_path}\${patch}\logs_all\${date_time}\apply-ddl\*" "${cicd_home_path}\${patch}\logs_error\${date_time}\apply-ddl\" -recurse -ErrorAction Ignore
+      Write-Output "apply-ddl > Error! Substring TOTAL ERRORS doesn't exists in file ${generate_ddl_import_log}."
+      Write-Output ("Error in apply-ddl!")>>"${unstable_stages_file}"
+              exit 1
+    }
+           
+            Process-EXTables -RepoPath $apply_ddl_repo_path -ImportTableFile $import_table_file
+           
+            # Critical - проверять наличие файлов "$apply_ddl_table_file и apply_ddl_index_file"
+    & "${path_java}" -classpath "{{ siebel_ojdbc7 }};{{ siebel_java_p_2 }};\" rtsegelnik.ddlFix "$apply_ddl_import_file" "$apply_ddl_table_file" "$apply_ddl_index_file" {{ siebel_apply_db_source }} ${db-user} ${db-pass} $apply_ddl_timeout ONLINE
+   
+            if (${debug}) {
+      Write-Output "===================== START DEBUG MESSAGES ====================="
+      Write-Output "apply-ddl > apply_ddl_table_file content:"
+              Get-Content -Path ${apply_ddl_table_file}
+              Write-Output "apply-ddl > apply_ddl_index_file content:"
+              Get-Content -Path ${apply_ddl_index_file}
+      Write-Output "===================== END DEBUG MESSAGES ====================="
+    }
+           
+            if(Test-Path -path "$apply_ddl_table_file"){
+              $SQL_TABLE = Get-Content "$apply_ddl_table_file" -Raw
+ 
+$sqlApplyTbl = @"
+whenever sqlerror exit 7;
+whenever oserror exit 8;
+set timing on;
+$SQL_TABLE
+"@
+ 
+      $sql_result = Write-Output "${sqlApplyTbl}" | sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }}
+      $sql_errors = Find-SqlErrors -SqlResult ${sql_result} -ExitCode $LASTEXITCODE
+           
+      if (${debug}) {
+         Write-Output "===================== START DEBUG MESSAGES ====================="
+         Write-Output "apply-ddl > sqlApplyTbl content:"
+                 Write-Output "${sqlApplyTbl} | sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }}"
+         Write-Output "===================== END DEBUG MESSAGES ====================="                                                                                                                                                                                                             
+         }
+            Process-SqlErrors -SqlResult ${sql_result} -SqlErrors ${sql_errors} -Stage "apply-ddl" -Critical $true
+              if (Test-Path -path "$apply_ddl_index_file"){
+              $SQL_INDEX = Get-Content "$apply_ddl_index_file" -Raw
+ 
+$sqlApplyIdx = @"
+whenever sqlerror exit 7;
+whenever oserror exit 8;
+set timing on;
+$SQL_INDEX
+"@
+ 
+      $sql_result = Write-Output "${sqlApplyIdx}" | sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }}
+      $sql_errors = Find-SqlErrors -SqlResult ${sql_result} -ExitCode $LASTEXITCODE
+ 
+        if (${debug}) {
+           Write-Output "===================== START DEBUG MESSAGES ====================="
+                   Write-Output "apply-ddl > sqlApplyIdx content:"
+           Write-Output "${sqlApplyIdx} | sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }}"
+           Write-Output "===================== END DEBUG MESSAGES ====================="
+        }
+              Process-SqlErrors -SqlResult ${sql_result} -SqlErrors ${sql_errors} -Stage "apply-ddl" -Critical $true
+              }
+              else {
+                Write-Output "apply-ddl > File $apply_ddl_index_file doesn't exists!"
+              }
+            }
+            elseif (Test-Path -path "$apply_ddl_index_file"){
+              Write-Output "apply-ddl > File $apply_ddl_table_file doesn't exists!"
+              $SQL_INDEX = Get-Content "$apply_ddl_index_file" -Raw
+ 
+$sqlApplyIdx = @"
+whenever sqlerror exit 7;
+whenever oserror exit 8;
+set timing on;
+$SQL_INDEX
+"@
+ 
+      $sql_result = Write-Output "${sqlApplyIdx}" | sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }}
+      $sql_errors = Find-SqlErrors -SqlResult ${sql_result} -ExitCode $LASTEXITCODE
+ 
+      if (${debug}) {
+         Write-Output "===================== START DEBUG MESSAGES ====================="
+                 Write-Output "apply-ddl > sqlApplyIdx content:"
+         Write-Output "${sqlApplyIdx} | sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }}"
+         Write-Output "===================== END DEBUG MESSAGES ====================="
+        }
+              Process-SqlErrors -SqlResult ${sql_result} -SqlErrors ${sql_errors} -Stage "apply-ddl" -Critical $true
+            }
+             else {
+              mkdir "${cicd_home_path}\${patch}\logs_error\${date_time}\apply-ddl\ddl_files\"
+      Write-Output "apply-ddl > Error! Files $apply_ddl_table_file and $apply_ddl_index_file doesn't exists!"
+      Write-Output ("Error in apply-ddl!")>>"${failed_stages_file}"
+      exit 1
+     }
+            }
+}
+ 
+if (${IncrementalTablePublish}) {
+    mkdir "${cicd_home_path}\${patch}\logs_all\${date_time}\IncrementalTablePublish"
+    $apply_ddl_repo_path = "${cicd_home_path}\${patch}\repo\"
+    $import_sif_cfg = "{{ siebel_tools_cicd_cfg }}"
+    $import_table_file = "${cicd_home_path}\${patch}\logs\apply-ddl-import_TableSchema.txt"
+    #Process-EXTables -RepoPath $apply_ddl_repo_path -ImportTableFile $import_table_file
+            Remove-Item "${cicd_home_path}\${patch}\logs\siebdev*" -ErrorAction Ignore
+   
+    & ${cicd_siebel_tools_path}\siebdev.exe /c "${import_sif_cfg}" /l ALL /d "{{ siebel_db_name }}" /u ${user} /p ${pass} /IncrementalTablePublish "${import_table_file}"
+    Wait-SiebDev -TimeOut 100
+    Start-Sleep -Seconds 3
+    cp ${import_table_file} "${cicd_home_path}\${patch}\logs_all\${date_time}\IncrementalTablePublish\"
+    mv "${cicd_home_path}\${patch}\logs\siebdev*" "${cicd_home_path}\${patch}\logs_all\${date_time}\IncrementalTablePublish\"
+}
+ 
+if (${CheckpointWorkspace}) {
+    # Critical - при ошибках сразу завершаем пайплайн
+    $sql_result = Write-Output "${sqlCheckpointWorkspace}" | sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }}
+    $sql_errors = Find-SqlErrors -SqlResult ${sql_result} -ExitCode $LASTEXITCODE
+ 
+    if (${debug}) {
+      Write-Output "===================== START DEBUG MESSAGES ====================="
+      Write-Output "${sqlShowObjectsStatus}" | sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }}
+      Write-Output "===================== END DEBUG MESSAGES ====================="
+    }
+ 
+    Process-SqlErrors -SqlResult ${sql_result} -SqlErrors ${sql_errors} -Stage "CheckpointWorkspace" -Critical $true
+}
+ 
+if (${Deliverworkspace}) {
+    # Critical - при ошибках сразу завершаем пайплайн
+    mkdir "${cicd_home_path}\${patch}\logs_all\${date_time}\Deliverworkspace"
+    $import_sif_cfg = "{{ siebel_tools_cicd_cfg }}"
+    $CheckDelivered_log = "${cicd_home_path}\${patch}\logs\CheckDelivered.log"
+    $SuccessDelivered_log = "${cicd_home_path}\${patch}\logs\SuccessDelivered.log"
+    Remove-Item ${CheckDelivered_log} -ErrorAction Ignore
+            Remove-Item ${SuccessDelivered_log} -ErrorAction Ignore
+    Remove-Item "${cicd_home_path}\${patch}\logs\siebdev*" -ErrorAction Ignore
+           
+    & ${cicd_siebel_tools_path}\siebdev.exe /c "${import_sif_cfg}" /d "{{ siebel_db_name }}" /u ${user} /p ${pass} /Deliverworkspace "dev_sadmin_{{ rocketsiebel_patch }}"
+    Wait-SiebDev -TimeOut 100
+    Start-Sleep -Seconds 3
+   
+    $sql_result = Write-Output "${sqlCheckDelivered}" | sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }}
+    $sql_result >>"${CheckDelivered_log}"
+    mv "${cicd_home_path}\${patch}\logs\siebdev*" "${cicd_home_path}\${patch}\logs_all\${date_time}\Deliverworkspace\"
+    mv "${CheckDelivered_log}" "${cicd_home_path}\${patch}\logs_all\${date_time}\Deliverworkspace\"
+    if ($sql_result -Match "Delivered") {
+            Write-Output "Deliverworkspace > Workspace is delivered!"
+            Write-Output "Delivered" >> ${SuccessDelivered_log}
+    }
+    else {
+        Write-Output "Deliverworkspace > Error! Checking log"
+        $deliverworkspace_error = Select-String -Path "${cicd_home_path}\${patch}\logs_all\${date_time}\Deliverworkspace\siebdev.log" -Pattern 'Another workspace delivery/rebase is in-progress. Please try after sometime.' -CaseSensitive
+        if ($deliverworkspace_error){
+            Write-Output "Deliverworkspace > Error! Workspace is NOT delivered! Another workspace delivery/rebase is in-progress. Waiting for ${deliverworkspace_timeout} seconds"
+            Start-Sleep -Seconds ${deliverworkspace_timeout}
+            Write-Output "Deliverworkspace > Start second run"
+            mkdir "${cicd_home_path}\${patch}\logs_all\${date_time}\Deliverworkspace\2"
+            Remove-Item ${CheckDelivered_log} -ErrorAction Ignore
+            Remove-Item ${SuccessDelivered_log} -ErrorAction Ignore
+            Remove-Item "${cicd_home_path}\${patch}\logs\siebdev*" -ErrorAction Ignore
+           
+            & ${cicd_siebel_tools_path}\siebdev.exe /c "${import_sif_cfg}" /d "{{ siebel_db_name }}" /u ${user} /p ${pass} /Deliverworkspace "dev_sadmin_{{ rocketsiebel_patch }}"
+            Wait-SiebDev -TimeOut 180
+            Start-Sleep -Seconds 3
+ 
+            $sql_result = Write-Output "${sqlCheckDelivered}" | sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }}
+            $sql_result >>"${CheckDelivered_log}"
+            mv "${cicd_home_path}\${patch}\logs\siebdev*" "${cicd_home_path}\${patch}\logs_all\${date_time}\Deliverworkspace\2\"
+            mv "${CheckDelivered_log}" "${cicd_home_path}\${patch}\logs_all\${date_time}\Deliverworkspace\2\"
+            if ($sql_result -Match "Delivered") {
+                Write-Output "Deliverworkspace> Second run > Workspace is delivered!"
+                Write-Output "Delivered" >> ${SuccessDelivered_log}
+                exit 0
+            }
+            else {
+                Write-Output "Deliverworkspace > Second run > Error!"
+            }
+        }
+        mkdir "${cicd_home_path}\${patch}\logs_error\${date_time}\Deliverworkspace"
+        cp "${cicd_home_path}\${patch}\logs_all\${date_time}\Deliverworkspace\" "${cicd_home_path}\${patch}\logs_error\${date_time}\Deliverworkspace" -recurse
+        Write-Output "Error! Workspace is NOT delivered! Check logs in ${cicd_home_path}\${patch}\logs_error\${date_time}\Deliverworkspace"
+        Write-Output ("Error in Deliverworkspace!")>>"${failed_stages_file}"
+        exit 1
+    }
+}
+ 
+if (${activate-wf}) {
+    # сделать unstable
+    $activate_wf_repo_path = "${cicd_home_path}\${patch}\repo\"
+    $WorkflowNames = Get-WorkflowNames -RepoPath $activate_wf_repo_path
+    if (!$WorkflowNames) {
+        Write-Output "Nothing to activate! Skip activate-wf"
+        exit 0
+    }
+ 
+    mkdir "${cicd_home_path}\${patch}\logs_all\${date_time}\activate-wf"
+    $error_count = 0   
+    #$activate_wf_url = "http://${siebel_web_balancer_url}:${siebel_web_balancer_port}/eai_anon_rus/start.swe?SWEExtSource=AnonWebService&SWEExtCmd=Execute&WSSOAP=1"
+    $activate_wf_url = "https://${siebel_web_balancer_url}:${siebel_web_balancer_port}/{{ eai_url_path }}"
+    Write-Output "activate_wf_url = ${activate_wf_url}"
+    $activate_wf_headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
+    $activate_wf_headers.Add("charset", 'utf-8')
+    $activate_wf_headers.Add("SOAPAction", '"document/http://siebel.com/CustomUI:ActivateWF"')
+    $ActivateWorkflow_log = "${cicd_home_path}\${patch}\logs\ActivateWorkflow.log"
+    $ActivateWorkflow_error_log = "${cicd_home_path}\${patch}\logs_error\${date_time}\activate-wf\ActivateWorkflow_error.log"
+    Remove-Item ${ActivateWorkflow_log} -ErrorAction Ignore
+    foreach ($WorkflowName in $WorkflowNames) {
+        $activate_wf_soap = [xml](Write-Output (${xmlActivateWorkflow} -f "${WorkflowName}"))
+        $activate_wf_out = Invoke-WebRequest $activate_wf_url -Method post -ContentType 'text/xml' -Body $activate_wf_soap -Headers $activate_wf_headers
+        Write-Output ("WorkflowName: ${WorkflowName}")>>"${ActivateWorkflow_log}"
+        Write-Output ("Server response: ${activate_wf_out}")>>"${ActivateWorkflow_log}"
+        $sql_result = Write-Output (${sqlActivateWorkflowStatus} -f "${WorkflowName}") | sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }}
+        $sql_result >> ${ActivateWorkflow_log}
+       
+        if (($activate_wf_out -Match '<ns:numFlowActivated>1</ns:numFlowActivated>') -and ($activate_wf_out -Match '<ns:Error_spcMessage>Success</ns:Error_spcMessage>') -and ($sql_result -Match "ACTIVE")) {
+            Write-Output "Workflow ${WorkflowName} is activated!"
+        }
+        else {
+            echo "ERROR! Workflow '${WorkflowName}' is NOT activated!"
+            mkdir "${cicd_home_path}\${patch}\logs_error\${date_time}\activate-wf\" -ErrorAction Ignore
+            Write-Output ("WorkflowName: ${WorkflowName}")>>"${ActivateWorkflow_error_log}"
+            Write-Output ("Server response: ${activate_wf_out}")>>"${ActivateWorkflow_error_log}"
+            Write-Output ("SOAP BODY: ${activate_wf_soap}")>>"${ActivateWorkflow_error_log}"
+            Write-Output ("SQL result:")>>"${ActivateWorkflow_error_log}"
+            ${sql_result}>>"${ActivateWorkflow_error_log}"
+            $error_count += 1
+        }
+        if (${debug}) {
+            Write-Output "===================== START DEBUG MESSAGES ====================="
+            Write-Output ("WorkflowName: ${WorkflowName}")
+            #Format-Xml -InputObject
+                                          Write-Output ("Server response: ${activate_wf_out}")
+            #Format-Xml -InputObject $activate_wf_soap
+            Write-Output "SQL query and connection sting:"
+            Write-Output "${sqlActivateWorkflowStatus} -f ${WorkflowName} | sqlplus -silent ${db-user}/${db-pass}@{{ siebel_db_name }} >>${ActivateWorkflow_log}"
+            Write-Output "error_count = ${error_count}"
+            Write-Output "===================== END DEBUG MESSAGES ====================="
+        }
+    }
+    mv "${ActivateWorkflow_log}" "${cicd_home_path}\${patch}\logs_all\${date_time}\activate-wf\"
+    if ($error_count -GT 0) {
+      Write-Output "There are some errors! error_count = ${error_count}. Write info in ${unstable_stages_file}"
+      Write-Output ("Error in activate-wf!")>>"${unstable_stages_file}"
+    }
+}
+ 
+#if (${compile-srf}) {
+#    $compile_srf_cfg = "{{ siebel_tools_cicd_cfg }}"
+#    $compile_srf_log = "${cicd_home_path}\${patch}\logs\siebdev.log"
+#    rm ${compile_srf_log} -ErrorAction Ignore
+#    & ${cicd_siebel_tools_path}\siebdev.exe /c "${compile_srf_cfg}" /d test /u ${user} /p ${pass} /bc "{{ siebel_repo }}" "${compile_srf_path}"
+#   Wait-SiebDev -TimeOut 120
+#         if (${debug}) {
+#        Get-Content -Path ${compile_srf_log}
+#    }
+#}
+ 
+if (${import-adm}) {
+    mkdir "${cicd_home_path}\${patch}\logs_all\${date_time}\import-adm"
+    $import_adm_jar_path = "{{ cicd_rocketsiebel_import_path }}"
+    $import_adm_jar = "${import_adm_jar_path}\siebel-import-cli.jar"
+    $import_adm_json = "{{ rs_siebel_types_json }}"
+    $import_adm_path = "${cicd_home_path}\${patch}\"
+    $import_adm_log = "${import_adm_jar_path}\logs\siebel-com-export-cli.log"
+            $repo_path = "${cicd_home_path}\${patch}\adm"
+            $repo_path_3 = "adm"
+            $CheckStage_log = "${cicd_home_path}\${patch}\logs_all\${date_time}\import-adm\import_adm_success_obj.log"
+            #$import_adm_path_2 = "C:\\cicd-home\\${patch}"
+    rm ${import_adm_log} -ErrorAction Ignore
+    rm "${cicd_home_path}\${patch}\logs\SiebelDataServer*" -ErrorAction Ignore
+    Set-Location $import_adm_jar_path
+    & "${path_java}" -jar ${import_adm_jar} ${import_adm_json} ${import_adm_path}
+    if (${debug}) {
+      Write-Output "===================== START DEBUG MESSAGES ====================="
+      Write-Output "IMPORT-ADM -> First run! Log output:"
+      Get-Content -Path ${import_adm_log}
+      Write-Output "===================== END DEBUG MESSAGES ====================="
+    }
+    $import_adm_result = Select-String -Path "${import_adm_log}" -Pattern 'Can''t import file' -CaseSensitive
+    mv "${import_adm_log}" "${cicd_home_path}\${patch}\logs_all\${date_time}\import-adm\"
+    mv "${cicd_home_path}\${patch}\logs\SiebelDataServer*" "${cicd_home_path}\${patch}\logs_all\${date_time}\import-adm\"
+ 
+    if ($import_adm_result) {
+        Write-Output "IMPORT-ADM -> First run -> Error! Can''t import file. Go to second run"
+        mkdir "${cicd_home_path}\${patch}\logs_all\${date_time}\import-adm\2-run"
+        rm "${cicd_home_path}\${patch}\logs\SiebelDataServer*" -ErrorAction Ignore
+                        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12                                
+                        Invoke-RestMethod -Uri "https://${siebel_web_balancer_url}:${siebel_web_balancer_port}/siebel/v1.0/service/ADM%20Responsibilities%20Activation%20Service/Activate" -TimeoutSec 240 -Method Post -ContentType 'application/json' -Body '{}'
+        Invoke-RestMethod -Uri "https://${siebel_web_balancer_url}:${siebel_web_balancer_port}/siebel/v1.0/service/Access%20Controlled%20Task%20Cache%20Clear%20Service/Activate" -TimeoutSec 240 -Method Post -ContentType 'application/json' -Body '{}'
+        Invoke-RestMethod -Uri "https://${siebel_web_balancer_url}:${siebel_web_balancer_port}/siebel/v1.0/service/LOV%20Cache%20Clear%20Service/Activate" -TimeoutSec 240 -Method Post -ContentType 'application/json' -Body '{}'                                  
+        & "${path_java}" -jar ${import_adm_jar} ${import_adm_json} ${import_adm_path}
+        if (${debug}) {
+          Write-Output "===================== START DEBUG MESSAGES ====================="
+          Write-Output "IMPORT-ADM -> Second run! Log output:"
+          Get-Content -Path ${import_adm_log}
+          Write-Output "===================== END DEBUG MESSAGES ====================="
+        }
+        $import_adm_result = Select-String -Path "${import_adm_log}" -Pattern 'Can''t import file' -CaseSensitive
+        mv "${import_adm_log}" "${cicd_home_path}\${patch}\logs_all\${date_time}\import-adm\2-run"
+        mv "${cicd_home_path}\${patch}\logs\SiebelDataServer*" "${cicd_home_path}\${patch}\logs_all\${date_time}\import-adm\2-run"
+       
+        if ($import_adm_result) {
+            Write-Output "IMPORT-ADM -> Second run-> Error! Can't import file. Copy logs to logs_error and finishing"
+            New-Item -ItemType Directory -Force -Path "$error_logs_path\import-adm"
+            Copy-Item "${cicd_home_path}\${patch}\logs_all\${date_time}\import-adm\*" -Destination "$error_logs_path\import-adm" -Recurse
+                                    Compress-Archive -Path "$error_logs_path\import-adm\2-run\*" -DestinationPath "$error_logs_path\import-adm\import-adm_error_log.zip"
+            ForEach ($import_adm_result_1 in $import_adm_result) {
+                   $import_adm_result_2 = $import_adm_result_1 -split "Can't import file"
+                   $import_adm_result_3 = $import_adm_result_2.Trim() | Select -Skip 1
+                   $myFilePath = Split-Path $import_adm_result_3 -Parent
+                   $myFilePath = $myFilePath+'\'
+                   $import_adm_result_4 = $myFilePath -split "${import_adm_path_2}\\adm\\" | Select -Skip 1
+                   New-Item -ItemType Directory -Force -Path "$error_logs_path\import-adm\adm\${import_adm_result_4}"
+                   Copy-Item "$import_adm_result_3" -Destination "$error_logs_path\import-adm\adm\${import_adm_result_4}"
+                           }
+                           Compress-Archive -Path "$error_logs_path\import-adm\adm" -Update -DestinationPath "$error_logs_path\import-adm\import-adm_error_log.zip"
+                           $ScriptErrorLog   = "$error_logs_path\import-adm\import-adm_error_log.zip"
+                           ForEach ($import_adm_result_1 in $import_adm_result) {
+                   $import_adm_result_2 = $import_adm_result_1 -split "Can't import file"
+                   $import_adm_result_3 = $import_adm_result_2.Trim() | Select -Skip 1
+                   $myFilePath = Split-Path $import_adm_result_3 -Parent
+                   $myFilePath = $myFilePath+'\'
+                   $import_adm_result_4 = $myFilePath -split "${import_adm_path_2}\\adm\\" | Select -Skip 1
+               $import_adm_result_5 = Write-Output ("$import_adm_result_4").Trim()
+               $import_adm_result_6 = "$import_adm_result_5".Replace('\',"/")
+                                                  #$exclude = @("import_adm_no_jira_task_*.log","Temp","adm","*.zip")
+                   #$path_arh = Get-ChildItem -Path "$error_logs_path\import-adm" -Exclude $exclude
+                                                  #Write-Output $path_arh | Compress-Archive -Update -DestinationPath "$error_logs_path\import-adm\Temp\import-adm_error_log.zip"
+                   #Compress-Archive -Path "$error_logs_path\import-adm\adm_error" -Update -DestinationPath "$error_logs_path\import-adm\Temp\import-adm_error_log.zip"
+                                                  #Write-Host -NoNewLine 'Press any key to continue...';
+                   #$null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown');
+                                                  $namefile = (Get-Item $import_adm_result_3).Name
+               Add-Type -AssemblyName System.Web
+                   $A = [System.Web.HttpUtility]::UrlDecode("$namefile")
+                   $B = $A.Split("_")[-1]
+                   $C = $A -replace "_$B",''
+                   $jiraTicketTemp_1 = ((Get-Content -Path "$filepath" -Encoding UTF8).Replace('"',"") | where {$_ -like "*/adm/$import_adm_result_6$C"})
+                   if ($jiraTicketTemp_1) {
+                        ForEach ($jiraTicketTemp_2 in $jiraTicketTemp_1) {
+                            $jiraObject = $jiraTicketTemp_2 -split ":" | Select -Skip 1
+                                    $jiraTicketTemp_7 = ($jiraTicketTemp_2 -split ':')[0]
+                                                                                   $jiraTicket = Write-Output ("$jiraTicketTemp_7").Trim()
+                                    Write-Output "<tr><td>$jiraTicket</td><td colspan='2' style='text-align:left;'>$jiraObject</td></tr>" | Out-File -FilePath "$error_logs_path\import-adm\import_adm_error_obj.log" -Append -Encoding utf8
+                                                                                   Write-Output "$jiraTicket" | Out-File -FilePath "$error_logs_path\import-adm\import_adm_error_rs_task.log" -Append -Encoding utf8
+                                                                                   Write-Output "$jiraObject" | Out-File -FilePath "$error_logs_path\import-adm\import_adm_error_object.log" -Append -Encoding utf8
+                                                                           $jiraTicketTemp_3 = Write-Output ("$jiraTicket").Trim()
+                                                           $jiraTicketTemp_4 = $jiraTicketTemp_4 + ', ' + $jiraTicketTemp_3
+                                                           $jiraTicketCount = ([regex]::Matches("$jiraTicketTemp_4", "$jiraTicketTemp_3" )).count
+                                                           if ($jiraTicketCount -le 1) {
+                                                               Write-Output "$jiraTicketCount"
+                                                           Write-Output "$jiraTicketTemp_4"
+                                                               $URIPath = "{{ jira_url }}/rest/api/2"
+                                $headers = @{'Authorization' = "Basic " + [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("${jira-user}:${jira-pass}"))}
+                                                               $result_Id_0 = (Upload-JiraFile $jiraTicket $ScriptErrorLog $URIPath $headers) -Split("/attachment/")
+                                $result_Id = $result_Id_0 -Split('","') | Select-Object -First 2 | Select-Object -Skip 1
+                                                                                               Write-Output $jiraTicketTemp_3":"$result_Id | Out-File -FilePath "$error_logs_path\import-adm\import_adm_error_obj_task.log" -Append -Encoding utf8
+                                                               $ScriptErrorLog_1 = (Get-Item $ScriptErrorLog).Name
+                                                               $body = '{"update": {"comment": [{"add": {"body": "Patch ' + ${patch} + '. Installation object ' + $jiraObject + ' is failed. Log with error: [' + ${ScriptErrorLog_1} + '|https://jirahq.rosbank.rus.socgen:8443/secure/attachment/' + $result_Id+'/'+${ScriptErrorLog_1} + ']"}}]}}'
+                                                               [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12                   
+                                                               Invoke-RestMethod -Uri "$URIPath/issue/$jiraTicket" -TimeoutSec 240 -Method Put -ContentType 'application/json' -Headers $headers -Body $body
+                                                                                               Remove-Item "$error_logs_path\import-adm\Temp" -Force -Recurse -ErrorAction Ignore
+                                            } else {
+                                                                                       $ScriptErrorLog_1 = (Get-Item $ScriptErrorLog).Name
+                                                                                               $jiraTicketTemp_5 = (Get-Content -Path "$error_logs_path\import-adm\import_adm_error_obj_task.log" -Encoding UTF8 | where {$_ -like "*$jiraTicketTemp_3*"})
+                                                                       $jiraTicketTemp_6 = $jiraTicketTemp_5 -split ":" | Select -Skip 1
+                                                               $body = '{"update": {"comment": [{"add": {"body": "Patch ' + ${patch} + '. Installation object ' + $jiraObject + ' is failed. Log with error: [' + ${ScriptErrorLog_1} + '|https://jirahq.rosbank.rus.socgen:8443/secure/attachment/' + $jiraTicketTemp_6+'/'+${ScriptErrorLog_1} + ']"}}]}}'
+                                                               [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12                   
+                                                               Invoke-RestMethod -Uri "$URIPath/issue/$jiraTicket" -TimeoutSec 240 -Method Put -ContentType 'application/json' -Headers $headers -Body $body
+                                            }  
+                        }
+                   } else {
+                   Write-Output "No Jira Task for object $jiraObject" >> "$error_logs_path\import-adm\import_adm_no_jira_task_${namefile}.log"
+                                                              Write-Output "<tr><td>No Jira Task</td><td colspan='2' style='text-align:left;'>/adm/$import_adm_result_6$C</td></tr>" | Out-File -FilePath "$error_logs_path\import-adm\import_adm_error_obj.log" -Append -Encoding utf8
+                                                              Write-Output "/adm/$import_adm_result_6$C" | Out-File -FilePath "$error_logs_path\import-adm\import_adm_error_object.log" -Append -Encoding utf8
+               }
+            }
+            $jiraTicketTemp_1 = (Get-Content -Path "$filepath" -Encoding UTF8 | where {$_ -like "*:/adm/*"})
+            if ($jiraTicketTemp_1) {
+                ForEach ($jiraTicketTemp_2 in $jiraTicketTemp_1) {
+                    $jiraObject = $jiraTicketTemp_2 -split ":" | Select -Skip 1
+                                                           if (Test-Path -path "$error_logs_path\import-adm\import_adm_error_object.log") {
+                                                   $jiraObjectTemp_1 = ((($jiraObject).Replace('"',"")).Replace('+','\+'))
+                                                           $jiraObjectTemp_2 = Select-String -Path "$error_logs_path\import-adm\import_adm_error_object.log" -Pattern "$jiraObjectTemp_1"
+                                                           if (!$jiraObjectTemp_2) {
+                                                               Write-Output $jiraObject
+                                $jiraTicketTemp_8 = ($jiraTicketTemp_2 -split ':')[0]
+                                                       Write-Output $jiraTicketTemp_8
+                                        $jiraTicket = Write-Output ("$jiraTicketTemp_8").Trim()
+                                Write-Output "<tr><td>$jiraTicket</td><td colspan='2' style='text-align:left;'>$jiraObject</td></tr>" | Out-File -FilePath "$CheckStage_log" -Append -Encoding utf8
+                                                       Write-Output "$jiraTicket" | Out-File -FilePath "${cicd_home_path}\${patch}\logs_all\${date_time}\import-adm\import_adm_success_rs_task.log" -Append -Encoding utf8
+                                                       Write-Output "$jiraObject" | Out-File -FilePath "${cicd_home_path}\${patch}\logs_all\${date_time}\import-adm\import_adm_success_object.log" -Append -Encoding utf8
+                    }
+                                            } else {
+                                                     Write-Output "Not exist File"
+                                                   }
+                                                           #$jiraTicketTemp_8 = ($jiraTicketTemp_2 -split ':')[0]
+                        ##$jiraTicketTemp_8 = $jiraTicketTemp_2 -split ":$jiraObject"
+                                    #$jiraTicket = Write-Output ("$jiraTicketTemp_8").Trim()
+                        #Write-Output "<tr><td>$jiraTicket</td><td colspan='2' style='text-align:left;'>$jiraObject</td></tr>" | Out-File -FilePath "$CheckStage_log" -Append -Encoding utf8
+                                                #Write-Output "$jiraTicket" | Out-File -FilePath "${cicd_home_path}\${patch}\logs_all\${date_time}\import-adm\import_adm_success_rs_task.log" -Append -Encoding utf8
+                }
+                                    } else {
+                                        $jiraTicket = "No Jira Task"
+                #Get-Childitem -Path "${cicd_home_path}\${patch}\repo" -Recurse -Force -File -Name | Split-Path
+                $repo_path_1 = Get-Childitem -Path "$repo_path" -Recurse -Force -File -Name
+                ForEach ($repo_path_2 in $repo_path_1) {
+                             Add-Type -AssemblyName System.Web
+                     $A = [System.Web.HttpUtility]::UrlDecode("$repo_path_2")
+                     $B = $A.Split("_")[-1]
+                     $C = ((($A -replace "_$B",'').Replace('\',"/").Replace('"',"")).Replace('+','\+'))
+                                                           if (Test-Path -path "$error_logs_path\import-adm\import_adm_error_object.log") {
+                                                                $jiraObjectTemp_2 = Select-String -Path "$error_logs_path\import-adm\import_adm_error_object.log" -Pattern "/$repo_path_3/$C"
+                                                               if (!$jiraObjectTemp_2) {
+                                                                    Write-Output $C
+                                                                                   $jiraObject = $C.Replace('\+','+')
+                                     Write-Output "<tr><td>$jiraTicket</td><td colspan='2' style='text-align:left;'>/$repo_path_3/$jiraObject</td></tr>" | Out-File -FilePath "$CheckStage_log" -Append -Encoding utf8
+                                                            Write-Output "$jiraObject" | Out-File -FilePath "${cicd_home_path}\${patch}\logs_all\${date_time}\import-adm\import_adm_success_object.log" -Append -Encoding utf8
+                         }
+                                                           }
+               }
+                            }
+                                    Write-Output ("Error in import-adm!")>>"${unstable_stages_file}"
+                                    Remove-Item "$error_logs_path\import-adm\import-adm_error_log.zip" -Force -Recurse -ErrorAction Ignore
+        } else {
+            $jiraTicketTemp_1 = (Get-Content -Path "$filepath" -Encoding UTF8 | where {$_ -like "*:/adm/*"})
+            if ($jiraTicketTemp_1) {
+                                        Import-Adm-Get-Name-Obj
+            } else {
+                                        No-Jira-Task
+                            }
+        }
+    } else {
+        $jiraTicketTemp_1 = (Get-Content -Path "$filepath" -Encoding UTF8 | where {$_ -like "*:/adm/*"})
+        if ($jiraTicketTemp_1) {
+                            Import-Adm-Get-Name-Obj
+        } else {
+                                    No-Jira-Task
+                        }
+    }
+}
+ 
+if (${backup-manual-adm}) {
+    # Critical - проверять наличие файла "${objects_manual_adm_export}"
+            $backup_manual_adm_path = "${cicd_home_path}\${patch}\objects_manual_adm_backup"
+            $export_adm_jar_path = "{{ cicd_rocketsiebel_export_adm_path }}"
+            $export_siebelagent_path = "{{ cicd_rocketsiebel_siebelagent_path }}"
+            $export_rocket_adm_jar = "${export_siebelagent_path}\Lib\siebel-export-cli-adm.jar"
+            $export_adm_log = "${export_adm_jar_path}\logs\siebel-com-export-cli.log"
+            $list_adm_objects_log = "${export_siebelagent_path}\ExportSessions\adm-export\ListManAdmObjects.log"
+            rm ${export_adm_log} -ErrorAction Ignore
+    rm "${cicd_home_path}\${patch}\logs\SiebelDataServer*" -ErrorAction Ignore
+            mkdir "${cicd_home_path}\${patch}\logs_all\${date_time}\Backup-manual-adm"
+ 
+    & "${path_java}" -classpath "{{ siebel_ojdbc7 }};{{ siebel_java_p_6 }};\" ListManAdmObjects "${cicd_home_path}\${patch}\Manual_ADM\adm" "${export_siebelagent_path}\ExportSessions\adm-export\export_queue.tmp" {{ siebel_db_name }} ${db-user} ${db-pass} DEBUG
+            $adm_objects_log_result = Select-String -Path "${list_adm_objects_log}" -Pattern 'Count files to backup = 0' -CaseSensitive
+   
+    if ($adm_objects_log_result) {
+        Write-Output "Count files to backup = 0"
+                        mv "${list_adm_objects_log}" "${cicd_home_path}\${patch}\logs_all\${date_time}\Backup-manual-adm\"
+                exit 0
+            }
+            if( !(Test-Path -path "${export_siebelagent_path}\ExportSessions\adm-export\export_queue.tmp") ){
+              mkdir "${cicd_home_path}\${patch}\logs_error\${date_time}\Backup-manual-adm"
+      Write-Output "backup-manual-adm > Error! File ${export_siebelagent_path}\ExportSessions\adm-export\export_queue.tmp doesn't exists!"
+      Write-Output ("Error in backup-manual-adm!")>>"${failed_stages_file}"
+      exit 1
+    }
+            else {
+              # set-variable -name TNS_ADMIN -value "${export_siebelagent_path}\Conf\env\{$env}"
+              # & "${path_java}" -jar ${export_rocket_adm_jar} adm-export "{$env}" "01/01/2018 00:00:00" ${user} ${pass} "Siebel Repository" "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=rsbt-dbtgenora-scan.trosbank.trus.tsocgen)(PORT=1525))(CONNECT_DATA=(SERVER=dedicated)(SERVICE_NAME=SBLT22)))"
+             
+              if( !(Test-Path -path "${cicd_home_path}\${patch}\logs") ){
+        New-Item -ItemType Directory -path "${cicd_home_path}\${patch}\logs"
+        }
+             Set-Location $export_adm_jar_path
+              & "$export_adm_jar_path\export-adm-rocket.bat"
+              if( !(Test-Path -path "${export_siebelagent_path}\ExportSessions\adm-export\adm") ){
+                mkdir "${cicd_home_path}\${patch}\logs_error\${date_time}\Backup-manual-adm"
+       Write-Output "backup-manual-adm > Error! Directory ${export_siebelagent_path}\ExportSessions\adm-export\adm doesn't exists!"
+        Write-Output ("Error in backup-manual-adm!")>>"${failed_stages_file}"
+        exit 1
+              }
+              else {
+                mv "${export_siebelagent_path}\ExportSessions\adm-export\export_queue.tmp" "${cicd_home_path}\${patch}\logs_all\${date_time}\Backup-manual-adm\"
+                mv "${export_siebelagent_path}\ExportSessions\adm-export\export_queue.tmp.loc" "${cicd_home_path}\${patch}\logs_all\${date_time}\Backup-manual-adm\"
+                mv "${export_adm_jar_path}\logs\siebel-com-export-cli.log" "${cicd_home_path}\${patch}\logs_all\${date_time}\Backup-manual-adm\"
+        mv "${cicd_home_path}\${patch}\logs\SiebelDataServer*" "${cicd_home_path}\${patch}\logs_all\${date_time}\Backup-manual-adm\"
+                        mv "${list_adm_objects_log}" "${cicd_home_path}\${patch}\logs_all\${date_time}\Backup-manual-adm\"
+                mv "${export_siebelagent_path}\ExportSessions\adm-export\adm" "$backup_manual_adm_path\"
+              }
+            }
+}
+ 
+if (${execute-scripts-after-apply-ddl}) {
+    $execute_scripts = "after_apply_ddl"
+    mkdir "${cicd_home_path}\${patch}\logs_all\${date_time}\after_apply_ddl"
+    $dirfiles = (get-childitem -Path "${cicd_home_path}\${patch}\DB\after_apply_ddl" -Directory).Name
+    ForEach ($dirfile in $dirfiles) {
+         #Write-Output $dirfile
+         if ($dirfile -eq 'SIEBEL') {
+                   SqlScripts-Execution-Variable
+                 }
+    }
+    ForEach ($dirfile in $dirfiles) {
+                 if ($dirfile -eq 'SIEBEL_STG') {
+                   ${db-user} = ${dbstg-user}
+                           ${db-pass} = ${dbstg-pass}
+                           SqlScripts-Execution-Variable
+                }
+    }
+    $dirfiles = (get-childitem -Path "${cicd_home_path}\${patch}\DB\after_apply_ddl" -Directory -Exclude SIEBEL,SIEBEL_STG).Name
+    ForEach ($dirfile in $dirfiles) {
+         [string]${db-user} = "$dirfile"
+                 ${db-user} += "-user"
+                 [string]${db-pass} = "$dirfile"
+                 ${db-pass} += "-pass"
+                 ${db-user} = Get-Variable -Name "${db-user}" -ValueOnly
+         ${db-pass} = Get-Variable -Name "${db-pass}" -ValueOnly
+                 SqlScripts-Execution-Variable
+    }
+}
+ 
+if (${PostDeliverworkspace}) {
+    $repo_path = "${cicd_home_path}\${patch}\repo"
+            $repo_path_3 = "repo"
+            $CheckStage_log = "${cicd_home_path}\${patch}\logs_all\${date_time}\Deliverworkspace\file_success_d.txt"
+            No-Jira-Task
+}

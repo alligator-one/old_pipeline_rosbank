@@ -1,0 +1,54 @@
+@#!/bin/bash          
+#--------- Скрипт создаёт структуру директорий для ручных adm
+#--------- От 26.05.2023
+#--------- V.1.0
+#--------- Используется файл siebel-types-adm.json
+#--------- Скрипт обрабатывает JSON-файл и на основе его содержимого создает директории и файлы .gitkeep.
+#--------- Структура создаваемых директорий зависит от значений полей “group”, “category” и “name” в JSON.
+#--------- Файлы .gitkeep используются для предотвращения удаления пустых директорий из системы контроля версий.
+ 
+WORK_DIR=$( cd "$(dirname "$0")" ; pwd -P ) # определения базового пути
+TYPE_ADM=$WORK_DIR/siebel-types-adm.json    # пределяет переменную TYPE_ADM, которая содержит полный путь к файлу siebel-types-adm.json.
+ADM_DIR=$( dirname $WORK_DIR )
+ 
+{% raw %}
+ 
+set -o errexit
+ 
+AWK_FILENAME=`basename ${BASH_SOURCE##*/} .sh`"-"` date "+%Y-%m-%d_%H_%M_%S" `".awk"
+
+# basename ... .sh - убирает расширение .sh из имени файла
+# basename - команда для получения имени файла без пути
+# .sh - указывает, что нужно убрать расширение
+# date "+%Y-%m-%d_%H_%M_%S" - получает текущую дату и время в формате:
+# %Y - полный год (4 цифры)
+# %m - месяц (01-12)
+# %d - день месяца (01-31)
+# %H - часы (00-23)
+# %M - минуты (00-59)
+# %S - секунды (00-59)
+# Все части соединяются:
+#  Имя скрипта без расширения
+#  Дефис (-)
+#  Текущая дата и время
+#  Расширение .awk
+
+ 
+#----------------------------------------------------создаём файл для awk-------------------------------------#
+echo "BEGIN { FS=\"\\\"\" }">>$AWK_FILENAME
+echo "/\"group\"/ { a_group=\$4 }">>$AWK_FILENAME
+echo "/\"category\"/ { a_category=\$4 }">>$AWK_FILENAME
+echo "/\"name\"/ { ">>$AWK_FILENAME
+echo "             a_name=\$4;">>$AWK_FILENAME
+echo "                        if (a_group==\"adm\") {">>$AWK_FILENAME
+echo "                             cmd1=\"mkdir -p \\\"\" a_dir \"/\" a_group \"/\" a_category \"/\" a_name \"\\\"\"">>$AWK_FILENAME
+echo "                             system(cmd1);">>$AWK_FILENAME
+echo "                             cmd2=\"touch \\\"\" a_dir \"/\" a_group \"/\" a_category \"/\" a_name \"/.gitkeep\" \"\\\"\"">>$AWK_FILENAME
+echo "                                    system(cmd2);">>$AWK_FILENAME
+echo "                                    }">>$AWK_FILENAME
+echo "                        }">>$AWK_FILENAME
+#--------------------------------------------------------------------------------------------------------------#
+ 
+echo "========Start (" ` date "+%Y-%m-%d %H:%M:%S" ` ")=============================="
+awk -v a_dir="$ADM_DIR" -f $AWK_FILENAME $TYPE_ADM
+echo "========End (" ` date "+%Y-%m-%d %H:%M:%S" ` ")=============================="

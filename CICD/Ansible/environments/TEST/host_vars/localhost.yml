@@ -1,0 +1,28 @@
+rs_url: "ROCKET_SERVER"
+tg_url: "TELEGRAM_SERVER/telegram/1.0/sendmessage"
+tg_token_url: "APIM_SERVER/oauth2/token?grant_type=client_credentials"
+jenkins_url: "JENKINS_SERVER"
+jira_url: "JIRA_SERVER"
+source_environment: "dev"
+target_environment: "cert"
+rocket_patch_download_environment: "cert"
+jira_filter: "21403"
+jira_filter_minor: "31808"
+jira_filter_nlt_minor: "34730"
+jira_filter_sas_ma: "37900"
+#jira_filter: "30936"
+app_list: "APP1, APP2"
+db_shema_dirs:
+  - shema: "SIEBEL"
+  - shema: "SIEBEL_STG"
+ 
+db_scripts_dirs:
+  - "BACKUP"
+  - "ROLLBACK"
+  - "RUN"
+ 
+db_scripts_major_release:
+  - "AFTER_APPLY_DDL_BEFORE_START_SERVER"
+  - "AFTER_APPLY_DDL_AFTER_START_SERVER"
+ 
+rs_siebel_manual_types_json: "C:\\RocketSiebel\\SiebelAgent\\Conf\\siebel-types-adm.json"

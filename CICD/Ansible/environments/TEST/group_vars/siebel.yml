@@ -1,0 +1,18 @@
+catalina_bin: "/opt/siebel/ses/applicationcontainer_external/bin/"
+ 
+#app_frontend_dst_path
+app_frontend_dst_path_files_app_classes: "/opt/siebel/ses/siebsrvr/classes"
+app_frontend_dst_path_files_app_plugins: "/opt/siebel/ses/siebsrvr/plugins"
+app_frontend_dst_path_files_app_sqltempl: "/opt/siebel/ses/siebsrvr/sqltempl"
+app_frontend_dst_path_files_app_web_inf_lib: "/opt/siebel/ses/applicationcontainer_internal/webapps/siebel/WEB-INF/lib"
+ 
+ 
+app_frontend_dirs:
+  - src: "{{ deploy_base_dir }}/siebel-nrt/files_app/classes/"
+    dst: "{{app_frontend_dst_path_files_app_classes}}"
+  - src: "{{ deploy_base_dir }}/siebel-nrt/files_app/plugins/"
+    dst: "{{app_frontend_dst_path_files_app_plugins}}"
+  - src: "{{ deploy_base_dir }}/siebel-nrt/files_app/sqltempl/"
+    dst: "{{app_frontend_dst_path_files_app_sqltempl}}"
+  - src: "{{ deploy_base_dir }}/siebel-nrt/files_app/web-inf_lib/"
+    dst: "{{app_frontend_dst_path_files_app_web_inf_lib}}"

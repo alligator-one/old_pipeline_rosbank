@@ -1,0 +1,67 @@
+#!/bin/bash
+ 
+{% raw %}
+ 
+#----------------------------------------
+ 
+cd $( cd "$(dirname "$0")" ; pwd -P )
+case "$1" in
+"")
+  echo "No parameters found, using parameter 'stopped' to stop Tomcat, 'started' to start Tomcat"
+;;
+stopped)
+  echo "Try to stop Tomcat"
+  /opt/siebel/ses/applicationcontainer_internal/bin/shutdown.sh
+  if [ $? -eq 0 ]
+  then
+    echo "Shutdown tomcat successfull"
+  else
+    echo "Stop Tomcat failed"
+    exit 1
+  fi
+  echo "Checking shutdown Tomcat"
+  ./check_service.sh -process "tomcat-juli.jar -Dcatalina" -state stopped
+  if [ $? -eq 0 ]
+  then
+    echo "Checking shutdown Tomcat successfull"
+  else
+    echo "Checking shutdown Tomcat failed"
+    echo "Tomcat will be killed"
+    ps -ef | pgrep -f 'tomcat-juli.jar -Dcatalina' | xargs -r kill -9
+            echo "Checking shutdown Tomcat"
+    ./check_service.sh -process "tomcat-juli.jar -Dcatalina" -state stopped
+    if [ $? -eq 0 ]
+    then
+      echo "Checking shutdown Tomcat successfull"
+    else
+      echo "Checking shutdown Tomcat failed"
+    fi
+    exit 1
+  fi
+  ;;
+started)
+  echo "Try to start Tomcat"
+  /opt/siebel/ses/applicationcontainer_internal/bin/startup.sh
+  if [ $? -eq 0 ]
+  then
+    echo "Start Tomcat successfull"
+  else
+    echo "Stop Tomcat failed"
+  fi
+  # Проверка портов tomcat
+  echo "Test Tomcat ports"
+  ./check_service.sh -process "tomcat-juli.jar -Dcatalina" -state started
+  if [ $? -eq 0 ]
+  then
+    echo "Started tomcat successfull"
+    exit 0
+  else
+    echo "Test Tomcat failed"
+    exit 1
+  fi
+  ;;
+*)
+  echo "Parameter not found"
+esac
+ 
+{% endraw %}
