@@ -221,34 +221,9 @@ Readme.md
 1. В Jenkins добавить креды для нового окружения. Подробнее, как добавить креды ниже
 2. В файлах pipelines/Jenkinsfile, pipelines/dockerBuild.Jenkinsfile, pipelines/generatePatch.Jenkinsfile в параметрах добавить выбор нового окружения. Подробнее ниже.
 3. В папке ansible/environments создать новую папку с названием требуемого окружения. Должно получиться ansible/environments/ENVIRONMENT, где ENVIRONMENT название требуемого окружения.
- 
-Пример:
- 
-Было:
- 
-![add-new-environment-1.png](assets/add-new-environment-1.png)
- 
-Стало:
- 
-![add-new-environment-2.png](assets/add-new-environment-2.png)
- 
 4. Скопировать в ранее созданную папку ansible/environments/ENVIRONMENT содержимое любой другой папки, описывающей окружение. Например ansible/environments/all.
- 
-Пример:
- 
-Было:
- 
-![add-new-environment-3.png](assets/add-new-environment-3.png)
- 
-Стало:
- 
-![add-new-environment-4.png](assets/add-new-environment-4.png)
- 
 5. Актуализировать данные во всех yml файлах в папке ansible/environments/ENVIRONMENT, где ENVIRONMENT название нового создаваемого окружения. IP адреса инстансов указываются в файле inventory.yml
- 
 6. Если в окружении используется несколько Siebel Web/App/Gate, то подробнее как их добавить описано [ниже](#ParameterizationPipelineAddEnvironmentManyHosts)
- 
-## <a name="ParameterizationPipelineAddCred"></a> Добавление кред для нового окружения
  
 Необходимо в Jenkins добавить следующие креды с определенным ID:
  
@@ -264,24 +239,14 @@ Readme.md
 Процесс добавление новых кред Jenkins указан ниже:
  
 Находясь в папке Siebel нажимаем **credentials**
- 
-![add-credentials-1](assets/add-credentials-1.png)
- 
+
 В открывшемся окне, внизу страницы находим секцию **Stores scoped to Siebel** и в ней выбираем папку **Siebel**
- 
-![add-credentials-2](assets/add-credentials-2.png)
  
 В открывшемся окне выбираем **Siebel-domain**
  
-![add-credentials-3](assets/add-credentials-3.png)
- 
 Если нужно добавить новые креды, тослева нажимаем **Add Credentials**
  
-![add-credentials-4](assets/add-credentials-4.png)
- 
 Если нужно обновить текущие креды, то напротив требуемых нажимаем:
- 
-![add-credentials-4.1](assets/add-credentials-4.1.png)
  
 В открывшемся окне добавляем соответствующие креды.
  
@@ -293,8 +258,6 @@ Readme.md
  
 Соответственно необходимо заменить **ENVIRONMENT** на название требуемого окружения
  
-![add-credentials-5](assets/add-credentials-5.png)
- 
 Если креда с ID **ENVIRONMENT-cicd-siebel-ssh**
  
 * В качестве kind указываем **SSH Username with private key**
@@ -303,14 +266,11 @@ Readme.md
 * Private Key - необходимо загрузить **приватную часть** SSH ключа
 * Passphrase - необязательный параметр. Необходимо указать пароль от приватного ключа при его наличии
  
-![add-credentials-6](assets/add-credentials-6.png)
- 
 ## <a name="ParameterizationPipelineAddEnvironment"></a> Добавление окружения в Jenkinsfile
  
 Во всех Jenkinsfile необходимо найти строку вида **choice(name: 'ENVIRONMENT', choices: ['test'], description: 'What environment to deploy')**. Она находится в блоке **parameters** в самом низу. Пример:
  
-![add-environment-jenkinsfile-1](assets/add-environment-jenkinsfile-1.png)
- 
+
 В данной строке необходимо дописать название нового окружения в блок **choices**. Например:
  
 Было:
@@ -321,10 +281,6 @@ Readme.md
  
 * choice(name: 'ENVIRONMENT', choices: ['test'**, 'cert'**], description: 'What environment to deploy')
  
-Пример:
- 
-![add-environment-jenkinsfile-2](assets/add-environment-jenkinsfile-2.png)
- 
 ## <a name="ParameterizationPipelineAddEnvironmentManyHosts"></a> Добавление нескольких хостов Siebel App/Web/Gate в рамках одного окружения
  
 Добавление хостов происходит внутри файла inventory.yml, который соответствует требуемому окружению. Соответственно, если нам необходимо добавить новый хост в cert окружение, то необходимо править файл ansible/environments/**cert**/inventory.yml
@@ -333,29 +289,18 @@ Readme.md
  
 1. Предположим, что в данный момент в окружении cert имеет один хост Siebel App и Siebel Web. Соответственно inventory.yml выглядит следующим образом:
  
-![add-new-host-in-environment-1](assets/add-new-host-in-environment-1.png)
- 
+
 2. Для того, чтобы добавить новые хосты необходимо дописать в файл информацию о новых хостах по аналогии с имеющимся. **Важно!** названия разных хостов не должны совпадать! Если есть хост с названием siebel_1, то другого хоста с таким именем уже быть не должно. Пример:
  
-![add-new-host-in-environment-2](assets/add-new-host-in-environment-2.png)
  
 3. Теперь в папке ansible/environments/**cert**/host_vars необходимо создать файлы .yml, которые будут иметь названия добавленных хостов. В данном примере были добавлены хосты siebel_2 и siebel_web_2, соответственно файлы должны иметь названия **siebel_2.yml** и **siebel_web_2.yml**. Переменные, которые должны содержаться в данных файлах, можно скопировать из аналогичных файлов **siebel_1.yml** и **siebel_web_2.yml** соответственно.
  
-Было:
- 
-![add-new-host-in-environment-3](assets/add-new-host-in-environment-3.png)
- 
-Стало:
- 
-![add-new-host-in-environment-4](assets/add-new-host-in-environment-4.png)
  
 4. После создания файлов необходимо заменить переменные в только что созданных файлах на актуальные для хостов.
  
 ### <a name="ParameterizationPipelineAddEnvironmentGate"></a> Добавление Siebel Gate
  
 В версии Siebel 16.19 работает только с одним Siebel Gate. Соответственно, для каждой инсталяции Siebel App есть свой Siebel Gate. Его IP необходимо указать в файле с переменными siebel хоста. Например в ansible/environment/test/siebel_1.yml
- 
-![add-siebel-gate](assets/add-siebel-gate.png)
  
 # <a name="Pipelines"></a> Работа пайплайнов
  
@@ -388,19 +333,13 @@ Readme.md
 Подробнее о работе каждой стадии описано ниже.
  
 ### <a name="PipelinesRocketSiebelGeneratePatchParameters"></a> Параметры запуска
- 
-Данный пайплайн имеет следующие параметры запуска:
- 
-![rocketsiebel-generate-patch-parameters.png](assets/rocketsiebel-generate-patch-parameters.png)
- 
-Подробнее о параметрах:
- 
+
+
 * GENERATE_PATCH_NAME - название генерируемого патча RocketSiebel. Может принимать любое значение. Пример: `080420-214dailyfix-night`
 * SKIP_* (вместо * указано название шага) - служит для пропуска какой либо из стадии пайплайна. Например, если необходимо пропустить стадию **Get issue jira** необходимо отметить параметр **SKIP_GET_ISSUE_JIRA**
 * SLEEP_TO_START_ROCKETSIEBEL_DEPLOY - указывает, какая задержка должна быть на стадии **Sleep to start RocketSeibel.Deploy**. [Подробнее о стадии](#PipelinesRocketSiebelGeneratePatchStageSleepToStartRocketSeibelDeploy) Указывать строго цифры. Указывать задержку необходимо в секундах.
 *  <a name="PipelinesRocketSiebelGeneratePatchParametersListStatusTasksJira"></a> LIST_STATUS_TASKS_JIRA - список статусов, которые необходимо установить задачам в рамках стадии **Set status tasks in Jira**. [Подробнее о стадии](#PipelinesRocketSiebelGeneratePatchStageSetStatusTasksInJira). Писать статусы необходимо **строго** как они указаны в Jira. Пример:
  
-![jira-example-status](assets/jira-example-status.png)
  
 Данная задача имеет два возможных статуса. Это **On Hold** и **В UAT пройден**. Соответственно, чтобы перевести данную задачу в **UAT** необходимо в LIST_STATUS_TASKS_JIRA указать **В UAT пройден**.
  
@@ -506,12 +445,7 @@ Readme.md
  
 ### <a name="PipelinesRocketSeibelDeployParameters"></a> Параметры запуска
  
-Данный пайплайн имеет следующие параметры запуска:
- 
-![rocketsiebel-deploy-parameters.png](assets/rocketseibel-deploy-parameters.png)
- 
-Подробнее о параметрах:
- 
+
 * PATCH_NAME - название патча RocketSiebel для деплоя. Может принимать любое значение. Пример: `080420-214dailyfix-night`
 * SKIP_* (вместо * указано название шага) - служит для пропуска какой либо из стадии пайплайна. Например, если необходимо пропустить стадию **Download patch** необходимо отметить параметр **SKIP_DOWNLOAD_PATCH**
 * INITIATOR_EMAIL - указывается почта, от имени которой будет по итогу рассылаться сообщения об успешности работы пайплайна.
@@ -604,13 +538,7 @@ Readme.md
 * [Publish](#PipelinesDockerBuildDevStagePublish)
  
 ### <a name="PipelinesDockerBuildDevParameters"></a> Параметры запуска
- 
-Данный пайплайн имеет следующие параметры запуска:
- 
-![docker-build-dev-parameters.png](assets/docker-build-dev-parameters.png)
- 
-Подробнее о параметрах:
- 
+
 * BRANCH - указывает, из какой ветки репозитория Siebel CICD необходимо клонировать код на агент.
  
 ### <a name="PipelinesDockerBuildDevStageCheckout"></a> Checkout
@@ -619,6 +547,4 @@ Readme.md
  
 ### <a name="PipelinesDockerBuildDevStageBuildImage"></a> Build image
  
-Собирает docker образ на агенте. Dockerfile находится по пути `scripts/Dockerfile`. [Подробнее о сборке Docker образов](#Docker)
- 
-### <a name="PipelinesDockerBuildDevStagePublish"></a> Publish# old_pipeline_rosbank
+Собирает docker образ на агенте. Dockerfile находится по пути `scripts/Dockerfile`. 
