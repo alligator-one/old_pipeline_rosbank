@@ -1,0 +1,1966 @@
+from unicodedata import name
+import requests
+from requests.auth import HTTPBasicAuth
+from jira import JIRA
+from jira import JIRAError
+import sys
+import json
+import os
+import urllib3
+import jenkins
+import re
+from datetime import timedelta, datetime
+ 
+projects = [
+    "Digital-PRO-P18150",  # PRODBO
+    "Siebel Platform Team",  # SPT
+    "Siebel CRM",  # CRM
+    "Siebel CRM CORP",  # PCCRM
+    "EXPRESS BANKING GUARANTEES",  # DBG
+    "Trade Finance Platform",  # TFP
+    "CARD Product"  # CARD
+]
+ 
+projects = [
+    "Siebel Platform Team"  # SPT
+]
+ 
+ 
+statuses_SPT = ["DEV CHECK", "РАЗРАБОТКА ЗАВЕРШЕНА", "FCT", "FCT DONE", "UAT", "UAT ПРОЙДЕН"]
+statuses_CARD = ["DEV CHECK", "DEVELOPMENT DONE",  "FCT", "FCT DONE", "UAT", "UAT ПРОЙДЕН"]
+statuses_TFP = ["DEVELOPMENT DONE", "INSTALLATION TEST", "INSTALLATION TEST DONE", "FCT", "FCT DONE","INSTALLATION CERT DONE", "UAT", "UAT DONE"]
+ 
+all_wfs = []
+check_task_1 = ''
+ 
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+ 
+RocketSiebelURL = '{{ rs_url }}'
+JENKINS_URL = '{{ jenkins_url }}'
+jiraURL = "{{ jira_url }}"
+releasebranchlog = '/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +"{{ generate_patch_name }}" +'/'
+ 
+def checkExistTaskInSiebel(nameTask):
+    url = RocketSiebelURL + "/SiebelConfigurator/api/featureBranches/comments/{{ source_environment }}:" + nameTask
+    response = requests.get(url=url,
+                            auth=HTTPBasicAuth(os.environ["ROCKETSIEBEL_USER"], os.environ["ROCKETSIEBEL_PASS"]))
+ 
+    print(response.status_code)
+ 
+    if response.status_code == 200:
+        return True
+ 
+    if response.status_code == 500:
+        return False
+ 
+    print(response.status_code)
+    print(response.text)
+    sys.exit(1)
+ 
+def getIssueFromJira():
+    jira_options = {'server': jiraURL, 'verify': False}
+    jira = JIRA(
+        auth=(os.environ['JIRA_USER'], os.environ['JIRA_PASS']),
+        options=jira_options
+    )
+ 
+#   print(os.environ["ENVIRONMENT_MINOR"])
+    if os.environ["ENVIRONMENT_MINOR"] == 'cert_minor':
+        tasks = jira.search_issues(jql_str="filter={{ jira_filter_minor }}",maxResults=False)
+#       print('minor is good')
+    elif os.environ["ENVIRONMENT_MINOR"] == 'cert_nlt_minor':
+        tasks = jira.search_issues(jql_str="filter={{ jira_filter_nlt_minor }}",maxResults=False)
+#       print('nlt minor is good')
+    elif os.environ["ENVIRONMENT_MINOR"] == 'cert_sas_ma':
+        tasks = jira.search_issues(jql_str="filter={{ jira_filter_sas_ma }}",maxResults=False)
+#       print('nlt minor is good')
+    elif os.environ["ENVIRONMENT_MINOR"] == 'prod_sas_ma':
+        tasks = jira.search_issues(jql_str="filter={{ jira_filter_sas_ma }}",maxResults=False)
+#       print('nlt minor is good')
+    else:
+        tasks = jira.search_issues(jql_str="filter={{ jira_filter }}",maxResults=False)
+#       print('minor is not good')
+    pathsList = []
+    for r in tasks:
+        pathsList.append(r.key)
+        issue = jira.issue(r.key)
+ 
+        if hasattr(issue.fields, 'customfield_13808') and issue.fields.customfield_13808 is not None and isinstance(issue.fields.customfield_13808, list):
+            for key in issue.fields.customfield_13808:
+                if key not in pathsList:
+                    pathsList.append(key)
+ 
+    print(pathsList)
+ 
+ 
+def startRocketSeibelDeploy(namePatch):
+    tasksName = getTaskFromPatchRS(namePatсh)
+    tasksName = '\\n'.join(tasksName)
+    env = "{{ target_environment }}"
+    env = env.upper()
+    text = 'Имя патча: ' + namePatсh + '\\nСреда: '+ env + '\\nСтатус: Начинается установка на среду.\\nСписок задач:\\n' + tasksName
+    sendStatusTelegram(namePath, text)
+    server = jenkins.Jenkins(JENKINS_URL, username=os.environ["JENKINS_USER"], password=os.environ["JENKINS_PASS"])
+    params = {
+        'PATCH_NAME': namePatch,
+        'BRANCH': 'master'
+    }
+    server.build_job('Siebel/RocketSeibel.Deploy', parameters=params)
+ 
+def createPathRocketSiebel(namePath):
+    print('---start create PatchRocketSiebel---')
+    tasks = sys.argv[3].replace('[u[', '[')
+    tasks = tasks.replace(']"]', ']')
+    tasks = tasks.replace('[[', '[')
+    tasks = tasks.replace(']]', ']')
+    tasks = tasks.replace("'", '"')
+ 
+    print(tasks)
+    tasksMass = json.loads('{ "id": ' + tasks + '}')["id"]
+    good_tasks = []
+ 
+    for task in tasksMass:
+        if checkExistTaskInSiebel(task):
+            good_tasks.append(task)
+      
+    if len(good_tasks) == 0:
+        env = "{{ target_environment }}"
+        env = env.upper()
+        text = 'Имя патча: ' + namePath + '\\nСреда: '+ env + '\\nСтатус: Нет задач RocketSiebel для установки\\n'
+        sendStatusTelegram(namePath, text)
+        file = releasebranchlog + namePath + '_no_tasks_rocket.txt'
+ 
+        with open(releasebranchlog + namePath + '_no_tasks_rocket.txt', 'w') as file:
+            string = 'no_tasks_rocket'
+            file.write(string)
+            file.close()
+        print("Нет задач RocketSiebel для установки")
+        return "Нет задач RocketSiebel для установки"
+   
+    dataRocketSiebelPath = {
+        "name": namePath,
+        "targetEnvironment": "{{ target_environment }}",
+        "sourceEnvironment": "{{ source_environment }}",
+        "featureIds": good_tasks
+    }
+    print(dataRocketSiebelPath)
+ 
+    r = requests.post(url=RocketSiebelURL + "/SiebelConfigurator/api/patch/", json=dataRocketSiebelPath,
+                       auth=HTTPBasicAuth(os.environ['ROCKETSIEBEL_USER'], os.environ['ROCKETSIEBEL_PASS']))
+ 
+    if r.status_code != 201:
+        print(r.text)
+        print(r.status_code)
+        sys.exit(1)
+       
+    tasksName = getTaskFromPatchRS(namePath)
+    tasksName = '\\n'.join(tasksName)
+    env = "{{ target_environment }}"
+    env = env.upper()
+    text = 'Имя патча: ' + namePath + '\\nСреда: '+ env + '\\nСтатус: Патч создан успешно\\nСписок задач:\\n' + tasksName
+    sendStatusTelegram(namePath, text)
+ 
+ 
+def updatePathRocketSiebel(namePath, listTask):
+   
+    dataRocketSiebelPath = {
+        "name": namePath,
+        "targetEnvironment": "{{ target_environment }}",
+        "sourceEnvironment": "{{ source_environment }}",
+        "featureIds": listTask
+    }
+    print(f"dataRocketSiebelPath = {dataRocketSiebelPath}")
+    print(f"url = {RocketSiebelURL}/SiebelConfigurator/api/patch/")
+ 
+    r = requests.patch(url=RocketSiebelURL + "/SiebelConfigurator/api/patch/", json=dataRocketSiebelPath,
+                       auth=HTTPBasicAuth(os.environ['ROCKETSIEBEL_USER'], os.environ['ROCKETSIEBEL_PASS']))
+ 
+    if r.status_code != 200:
+        print(r.text)
+        print(r.status_code)
+        sys.exit(1)
+ 
+ 
+def checkConflictPathRocketSiebel(namePath):
+    dataCheckConflict = {
+        "stringent-delete": False,
+        "stringent-add": False,
+        "incremental": True,
+        "patch-property-split": False
+    }
+    r = requests.post(url=RocketSiebelURL + "/SiebelConfigurator/api/patch/test/dev/" + namePath, json=dataCheckConflict,
+                      auth=HTTPBasicAuth(os.environ['ROCKETSIEBEL_USER'], os.environ['ROCKETSIEBEL_PASS']))
+ 
+    if r.status_code != 200:
+        print(r.text)
+        print(r.status_code)
+        sys.exit(1)
+ 
+ 
+def getPatchConflict(namePath):
+    tasks = sys.argv[3].replace('[u[', '[')
+    tasks = tasks.replace(']"]', ']')
+    tasks = tasks.replace('[[', '[')
+    tasks = tasks.replace(']]', ']')
+    tasks = tasks.replace("'", '"')
+ 
+    tasksMass = json.loads('{ "id": ' + tasks + '}')["id"]
+    good_tasks = []
+ 
+    for task in tasksMass:
+        if checkExistTaskInSiebel(task):
+            good_tasks.append(task)
+ 
+    dataCheckConflict = {
+        "stringent-delete": False,
+        "stringent-add": False,
+        "incremental": True,
+        "patch-property-split": False
+    }
+    r = requests.post(url=RocketSiebelURL + "/SiebelConfigurator/api/patch/test/{{ target_environment }}/" + namePath,
+                      json=dataCheckConflict,
+                      auth=HTTPBasicAuth(os.environ['ROCKETSIEBEL_USER'], os.environ['ROCKETSIEBEL_PASS']))
+    print(f"url = {r.url}")
+    if r.status_code != 200:
+        print(r.text)
+        print(r.status_code)
+        sys.exit(1)
+   
+    
+    if r.text == '[]':
+        tasksName = getTaskFromPatchRS(namePath)
+        tasksName = '\\n'.join(tasksName)
+        env = "{{ target_environment }}"
+        env = env.upper()
+        now = datetime.now()
+        sec = int(os.environ["TIME_FOR_RESOLVE"])
+        for_resolve = now + timedelta(hours=3, seconds=sec)
+        text = 'Имя патча: ' + namePath + '\\nСреда: '+ env + '\\nСтатус: Проверка конфликтов.\\nКонфликты не обнаружены.\\nОжидаемое время начала установки: '+ for_resolve.strftime("%H:%M") +'\\nСписок задач:\\n' + tasksName
+        sendStatusTelegram(namePath, text)
+        return
+ 
+    print(f"status_code = {r.status_code}")
+    json_data = json.loads(r.text)
+ 
+    conflictIDs = []
+    for data in json_data:
+        conflictIDs.append(data['feature'])
+        print(f"sendCommentJira:  {data['feature']} Patch Conflict. data={data['description']}")
+        sendCommentJira(data['feature'], "Patch Conflict. " + data['description'])
+    conflictIDs = set(conflictIDs)
+    conflictIDs = '\\n'.join(conflictIDs)
+    now = datetime.now()
+    sec = int(os.environ["TIME_FOR_RESOLVE"])
+    for_resolve = now + timedelta(hours=3, seconds=sec)
+    env = "{{ target_environment }}"
+    env = env.upper()
+    text = 'Имя патча: ' + namePath + '\\nСреда: ' + env + '\\nСтатус: Обнаружены конфликты.\\nПросьба решить конфликты до '+ for_resolve.strftime("%H:%M") +'\\nЗадачи с конфликтами:\\n' + conflictIDs
+    sendStatusTelegram(namePath, text)
+ 
+def resolvePathConflict(namePath):
+   
+    i = 0
+    tasks = sys.argv[3].replace('[u[', '[')
+    tasks = tasks.replace(']"]', ']')
+    tasks = tasks.replace('[[', '[')
+    tasks = tasks.replace(']]', ']')
+    tasks = tasks.replace("'", '"')
+ 
+    tasksMass = json.loads('{ "id": ' + tasks + '}')["id"]
+    good_tasks = []
+    check_wf = []
+    print("---tasks---")
+    print(tasksMass)
+ 
+   for task in tasksMass:
+        if checkExistTaskInSiebel(task):
+            good_tasks.append(task)
+    print("---good tasks---")
+    print(good_tasks)
+ 
+    dataCheckConflict = {
+        "stringent-delete": False,
+        "stringent-add": False,
+        "incremental": True,
+        "patch-property-split": False
+    }
+    r = requests.post(url=RocketSiebelURL + "/SiebelConfigurator/api/patch/test/{{ target_environment }}/" + namePath,
+                      json=dataCheckConflict,
+                      auth=HTTPBasicAuth(os.environ['ROCKETSIEBEL_USER'], os.environ['ROCKETSIEBEL_PASS']))
+    print(f"url = {r.url}")
+    if r.status_code != 200:
+        print(r.text)
+        print(r.status_code)
+        sys.exit(1)
+    if r.text == '[]':
+        tasks_list = getTaskFromPatchRS(namePath)
+        tasks_list = '\\n'.join(tasks_list)
+        env = "{{ target_environment }}"
+        # env2 = "{{ target_environment }}"
+        env = env.upper()
+        text = 'Имя патча: ' + namePath + '\\nСреда: ' + env + '\\nСтатус: Начало установки патча.\\nПатч собран успешно.\\n‼️ Просьба не проводить никаких работ с WS на ' + env + ', так как это может повлиять на поставку. ‼️\\nСписок задач:\\n' + tasks_list
+        sendStatusTelegram(namePath, text)
+        
+        print('----Try to check rocket----')
+ 
+        get_all_fws("{{ source_environment }}")
+ 
+        Jira_Tasks = getIssueFromJira2("36091") # devupg
+        string2 = ''
+        for task in Jira_Tasks:
+            print(f"Проверяем, есть ли у задачи из {task} wf в Рокете")
+            task = str(task)
+            check_task_1 = (getStatusFromJira(task))
+            # if task == ''
+            # date_to_check = (getStatusFromJira(task[1]))
+            if task in all_wfs:
+                if len(get_fws(task)) > 0:
+                    print(f"wf в задаче {task} найден!")
+                    # print(f"тип задачи Джира: {check_task_1[2]}")
+                    # получить список задач из рокета для задачи
+                    tasks2 = get_fws(task)  #
+                    # преобразовать список в множество
+                    set1 = set(tasks2)
+                else:
+                    set1 = set()
+                    print(f"---Нет wf в задаче {task}---")
+                # ищем все задачи в статусе разработка во всех проектах и для которых заведены задачи в рокете и в которых есть такой же ВФ
+                for project in projects:
+                    issues = getAllFromJira(project)
+                    for issue in issues:
+                        stat = issue.fields.status
+                        name = issue.key
+                        # print(f"{name} - {stat}")
+                        n = get_fws(name)
+                        if len(n) != 0:
+                            if task != name:
+                                # print(f"---wf из {task} найден в {name}---")
+                                # print(getStatusFromJira(name))
+                                check_task_2 = (getStatusFromJira(name))
+                                date_temp1 = check_task_1[1][:-10]
+                                date_temp2 = check_task_2[1][:-10]
+                                date1 = datetime.strptime(date_temp1, "%Y-%m-%dT%H:%M:%S")
+                                date2 = datetime.strptime(date_temp2, "%Y-%m-%dT%H:%M:%S")
+ 
+                                date1_formatted = date1.strftime("%d/%m/%Y %H:%M:%S")
+                                date2_formatted = date2.strftime("%d/%m/%Y %H:%M:%S")
+ 
+                                check_status_1 = str(check_task_1[0]).upper()
+                                check_status_2 = str(check_task_2[0]).upper()
+ 
+                                # Если задача из рокета по статусу ниже чем задача из конвейера и задача из конвейера создана раньше чем
+                                # задача из рокета
+                                # if check_status_2 in statuses_low and check_status_1 in statuses_high:
+ 
+                                print(f"*** Проверяем задачи {task},{name} ***\n со статусами {check_status_1}, {check_status_2} \n c датами: {date1_formatted}, {date2_formatted}")
+ 
+                                if return_pr(task, check_status_1) < return_pr(name,  check_status_2) and date1 < date2:
+                                    # print(print(getStatusFromJira(name)))
+                                    print(f"Проверяем задачу {name} на конфликты")
+                                    set2 = set(n)
+                                    diff = set1.intersection(set2)
+                                    if len(diff) != 0:
+ 
+                                        print(f"Возможные конфликты в {task}, есть пересечения в {name}:")
+                                        print(
+                                            f"Статус задачи {name} (найдена в Рокете): \"{check_task_2[0]}\" \t \t  Время создания задачи: {date2_formatted}")
+                                        print(
+                                            f"Статус задачи {task} (из конвейера): \"{check_task_1[0]}\" \t \t  Время создания задачи: {date1_formatted}")
+ 
+                                        print(f"Найдено пересечений: {len(diff)}")
+ 
+                                        check_wf.append(task)
+                                        check_wf.append(name)
+                                        print(f"check_wf: {check_wf}")
+ 
+                                        if len(diff) <= 50:
+                                            send_text = []
+                                            print(f"Возможные пересечения:")
+                                            for d in diff:
+                                                # pass
+                                                # Выводим или добавляем в список найденные пересекающиеся wf
+                                                print(f"{d}")
+                                                send_text.append(d)
+                                            task_to_send = ''   
+                                            for task_c in send_text:
+                                                task_to_send = task_to_send + ''.join(task_c) + ','
+                                                string = str(task_to_send[:-1])
+ 
+                                        string = f'{task} и {name}, wf: {task_to_send[:-1]} ; '
+                                        string2 = string2 + string
+                                        print(string)
+                                        i += 1
+                                    else:
+                                        print(f'В задаче {name} нет конфликта')
+ 
+        if i > 0:
+            string2 = 'Конфликтующие задачи: ' + string2
+            # sendStatusTelegram(string2)
+            sendStatusTelegram(namePath, string2)
+ 
+            if len(check_wf) > 0:
+                for tsk in check_wf:
+                    if tsk in good_tasks:
+                        print(f'***tsk {tsk}***')
+                        good_tasks.remove(tsk)
+                print(f'***good task: {good_tasks}***')   
+                print(f"===========good_tasks===========")
+                print(f"{good_tasks}")
+                print(f"================================")
+ 
+                updatePathRocketSiebel(namePath, good_tasks)
+                tasks_list = getTaskFromPatchRS(namePath)
+                tasks_list = '\\n'.join(tasks_list)
+                env = "{{ target_environment }}"
+                env = env.upper()
+                text = 'Имя патча: ' + namePath + '\\nСреда: ' + env + '\\nСтатус: Начало установки поставки.\\n‼️ *Просьба не проводить никаких работ с WS на ' + env + ', так как это может повлиять на поставку.* ‼️\\nЗадачи с конфликтами исключены.\\nИтоговый список задач:\\n' + tasks_list
+                sendStatusTelegram(namePath, text)           
+ 
+        return
+ 
+    print(f"status_code = {r.status_code}")
+    json_data = json.loads(r.text)
+ 
+    conflictIDs = []
+    for data in json_data:
+        conflictIDs.append(data['feature'])
+        print(f"sendCommentJira:  {data['feature']} Conflict ADM. data={data['description']}")
+        sendCommentJira(data['feature'], "Conflict ADM. " + data['description'])
+ 
+    print(f"===========conflictIDs===========")
+    print(f"{conflictIDs}")
+    print(f"=================================")
+ 
+    for data in conflictIDs:
+        if data in good_tasks:
+            good_tasks.remove(data)
+ 
+    if len(good_tasks) == 0:
+        env = "{{ target_environment }}"
+        env = env.upper()
+        text = 'Имя патча: ' + namePath + '\\nСреда: '+ env + '\\nСтатус: Нет задач RocketSiebel для установки\\n'
+        sendStatusTelegram(namePath, text)
+        file = releasebranchlog + namePath + '_no_tasks_rocket.txt'
+ 
+        with open(releasebranchlog + namePath + '_no_tasks_rocket.txt', 'w') as file:
+            string = 'no_tasks_rocket'
+            file.write(string)
+            file.close()
+        print("Нет задач RocketSiebel для установки")
+        return "Нет задач RocketSiebel для установки"
+    else:
+        print(f"===========good_tasks===========")
+        print(f"{good_tasks}")
+        print(f"================================")
+ 
+        updatePathRocketSiebel(namePath, good_tasks)
+        tasks_list = getTaskFromPatchRS(namePath)
+        tasks_list = '\\n'.join(tasks_list)
+        env = "{{ target_environment }}"
+        env = env.upper()
+        text = 'Имя патча: ' + namePath + '\\nСреда: ' + env + '\\nСтатус: Начало установки поставки.\\n‼️ *Просьба не проводить никаких работ с WS на ' + env + ', так как это может повлиять на поставку.* ‼️\\nЗадачи с конфликтами исключены.\\nИтоговый список задач:\\n' + tasks_list
+        sendStatusTelegram(namePath, text)
+ 
+ 
+def sendCommentJira(nameTask, text):
+    jira_options = {'server': jiraURL, 'verify': False}
+    jira = JIRA(
+        auth=(os.environ['JIRA_USER'], os.environ['JIRA_PASS']),
+        options=jira_options
+    )
+ 
+    try:
+        jira.add_comment(issue=nameTask, body=text)
+    except JIRAError as e:
+        print(nameTask + " not found in Jira, sendCommentJira")
+ 
+def mergePatchRocketSiebel(namePath):
+    dataMergePatch = {
+        "stringent-delete": False,
+        "stringent-add": False,
+        "incremental": True,
+        "patch-property-split": False
+    }
+ 
+    # try:
+    # print(namePath)
+    # file = releasebranchlog + namePath
+    # open(file, 'w').close()
+    # except:
+    #    print('---I cant create file with tasks---')
+ 
+    r = requests.post(url=RocketSiebelURL + "/SiebelConfigurator/api/patch/apply/{{ target_environment }}/" + namePath, json=dataMergePatch,
+                  auth=HTTPBasicAuth(os.environ['ROCKETSIEBEL_USER'], os.environ['ROCKETSIEBEL_PASS']))
+   
+    print(f"url={RocketSiebelURL}/SiebelConfigurator/api/patch/apply/{{ target_environment }}/{namePath}")
+    print(f"json={dataMergePatch}")
+   
+    if r.status_code != 200:
+        print(r.text)
+        print(r.status_code)
+        sys.exit(1)
+ 
+# Get list name Task from Patch RocketSiebel
+def getTaskFromPatchRS(namePatch):
+ 
+    r = requests.get(url=RocketSiebelURL + "/SiebelConfigurator/api/patch/{{ rocket_patch_download_environment }}/" + namePatch,
+                     auth=HTTPBasicAuth(os.environ['ROCKETSIEBEL_USER'], os.environ['ROCKETSIEBEL_PASS']))
+ 
+    if r.status_code != 200:
+        print(r.text)
+        print(r.status_code)
+        sys.exit(1)
+ 
+    tasks = json.loads(r.content)
+    tasksName = []
+    for task in tasks:
+        tasksName.append(task['featureName'])
+    print('----add debug taskName---getTaskFmorPatchRS---')
+    print(tasksName)
+ 
+    # try:
+    #     with open('/tmp/siebel-deploy/rocket_'+namePatch, 'w') as file:
+    #         string2 = ' '.join(taskName)
+    #         print('---string----: ' + string2)
+    #         file.write(string2)
+    #         file.close()
+    #         print('---File rocket is created---')
+    #         print('---------output from --output from rocket -----------')
+    #         with open('/tmp/siebel-deploy/rocket.txt', 'r') as file:
+    #             print(*file)
+    #             file.close()
+    # except:
+    #     print('---I cant create file rocket.txt---')
+ 
+    return tasksName
+ 
+ 
+def createReleaseBranch(namePatch):
+    import git
+    import collections
+    import re
+    import git
+    import pathlib
+    import shutil
+ 
+    print('---sys.argv---:')
+    print(sys.argv)
+    tasks = sys.argv[3].replace('u[', '[')
+    tasks = tasks.replace(']"]', ']')
+    tasks = tasks.replace('[[', '[')
+    tasks = tasks.replace(']]', ']')
+    tasks = tasks.replace("'", '"')
+    jira_tasks = json.loads('{ "id": ' + tasks + '}')["id"]
+    repo_str = '/tmp/siebel-deploy/siebel-nrt/' 
+    releasebranchlog = '/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/'+ namePatch +'/'
+    temp_for_git_str = '/tmp/siebel-deploy/temp_for_git/' 
+    print('------jira tasks----------')
+    print(jira_tasks)
+    now = datetime.now()
+    text = ''
+    target_branch = os.environ["ENVIRONMENT"]
+    env = os.environ["ENVIRONMENT"]
+    env = env.upper()
+    arr_send = []
+ 
+    print('-----target branch-----')
+    print(target_branch)
+    # print()
+    release_branch = f'{target_branch}_{now.strftime("%d.%m.%Y")}_build_{os.environ["BUILD_NUMBER"]}'  # восстановить для прода
+    # if target_branch == 'prod':
+    #    target_branch = "master"
+    #    release_branch = f'release_branch_{os.environ["BUILD_NUMBER"]}'
+    repo = git.Repo(repo_str)
+ 
+    print(os.environ["GITLAB_USER"])  #
+    repo.config_writer().set_value("credential", "username",
+                                   os.environ["GITLAB_USER"]).release()  # 26/01/2023 - восстановить
+    repo.config_writer().set_value("credential", "helper",
+                                      '"!f() { echo password=${GITLAB_PASS}; }; f"').release()  # 26/01/2023 - восстановить
+    for remote in repo.remotes:
+        remote.fetch()
+    repo.git.reset('--hard')
+ 
+    for b in repo.remote().fetch():
+        #print('---b.name in rep.remote cycle:---')
+        #print(b.name)
+        for task in jira_tasks:
+            string = 'origin/feature/'+str(task)
+            #print('---string in repo remote cycle----')
+            #print(string)
+            if f'origin/feature/'+str(task) == str(b.name):
+                #print('---found task in cycle:---')
+                # print('origin/'+ str(b.nname))
+                #try:
+                repo.git.checkout('-B', b.name.split('/', 1)[1], '--track', b.name)
+                # print('---I can checkout---')
+                #print(b.name)
+                #except:
+                #    print('---I cant checkout---')
+ 
+    print('---branches before search---')
+    print(release_branch)
+    print(target_branch)
+    # try
+    try:
+        repo.git.checkout('-b', release_branch, target_branch)
+    except:
+        print('---checkout failed----')
+    print('-----active branch is: {} before search-----'.format(repo.active_branch))
+    branches_to_check = []
+    branches_to_merge = []
+    # print('---jira_tasks:----' + str(jira_tasks))
+    # print('-------------start search branches to merge ------------------')
+    for task in jira_tasks:
+        print('--task in jira task:---')
+        print(task)
+        for branch in repo.branches:
+            print('---branch in repo.branches---')
+           print(branch)
+            if f'feature/{task}' == str(branch):
+                print('---branch to check append:---')
+                print(branch)
+                branches_to_check.append(str(branch))
+    branches_with_changes = []
+   
+    # очистка временного каталога
+    for files in os.listdir(temp_for_git_str):
+        path = os.path.join(temp_for_git_str, files)
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            os.remove(path)
+    del_files_list = []
+    all_copy_files = {}
+    all_deleted_files = {}
+    files_arr = {}
+    html_file = "/tmp/siebel-deploy/releasebranchlog/temp.html"
+    if os.path.isfile(html_file):
+        os.remove(html_file)
+ 
+    # Формирование массивов Копирование и удаление файлов
+    for branch in branches_to_check:
+   
+        repo.git.checkout(branch)
+        d = dict()  # временный словарь
+        all_commits = dict()  # словарь с файлами во всех коммитах ветки
+        od = dict()  # temp ordered dict
+        files_arr = {}  # словарь файлов,
+        files_list = [] # список файлов
+        del_files_arr = {}  # словарь со всеми удаленными файлами
+   
+        i = 0
+        for c in repo.iter_commits(branch):
+            i+=1
+            stringStart = re.search('Task installed to ' + os.environ["ENVIRONMENT"], c.message)
+            if stringStart is not None and i == 1:
+                print('---Task Installed found---')
+                break
+ 
+            task_number = re.search(r'^[a-zA-Z]+-[0-9]+', c.message.upper())
+            branch_task = re.search(r'\AFEATURE/+[A-Z]+-\d+\Z', branch.upper())
+ 
+            if task_number is not None and task_number[0] == branch_task[0].replace('FEATURE/', ''):
+                l = list()  # временный список добавленных и измененных файлов
+                df = list()  # временный список удаленных файлов
+                # получаем список удаленных файлов
+                del_files = repo.git.show("--diff-filter", "D", "--pretty=format:", "--name-only", c.hexsha)
+                print('---del_files---')
+                print(del_files)
+                if len(del_files) > 0:
+                    df = del_files.split('\n')
+                    # print('--df:---')
+                    # print(df)
+                for items in c.stats.files.items():
+                    if items[0] not in df:
+                        l.append(items[0])
+                #if len(l) > 0:
+                #    d[c.authored_datetime] = [task_number[0], c.message, c.hexsha, l, df, branch]
+                d[c.authored_datetime] = [task_number[0], c.message, c.hexsha, l, df, branch]
+ 
+        if len(d) != 0:
+            od = collections.OrderedDict(sorted(d.items(), key=lambda t: t[0], reverse=False))
+            #print('--od:---')
+            #print(od)
+            counter = 0
+            # com_list_to_check = list()
+ 
+            # формирование цепочек коммитов, начинающихся после Task installed to..."
+ 
+            for l_data, l_elem in od.items():
+                string = 'Task installed to ' + os.environ["ENVIRONMENT"]
+                string2 = ''
+                pattern = re.search(string, l_elem[1])
+                if pattern is None and counter == 0:  # Task installed failed to appear
+                    #print('---no pattern and counter is 0---')
+                    files_arr[l_data] =[l_elem[3], l_elem[5]]
+                    if len(l_elem[4]) > 0:
+                        del_files_arr.update({l_data: l_elem[4]})
+                elif pattern is not None and counter == 0:  # first appearance of Task installed
+                    #print('---first appear string---')
+                    #print(counter)
+                    files_arr = {}
+                    del_files_arr = {}
+                    counter = counter + 1
+                elif pattern is None and counter == 1:  # continue to collect current commits chain
+                    #print('---continue to collect current commits chain---')
+                    files_arr[l_data] =[l_elem[3], l_elem[5]]
+                    if len(l_elem[4]) > 0:
+                        del_files_arr.update({l_data: l_elem[4]})
+                elif pattern is not None and counter == 1:  # new appearance of Task installed
+                    #print('---new appearance of Task installed---')
+                    files_arr = {}
+                    del_files_arr = {}
+            all_deleted_files.update(del_files_arr)
+            all_copy_files.update(files_arr)
+        else:
+            print('---no changes in branch---')
+            continue
+       
+        # запись файла deploy_dop_objects.txt если есть устанавливаемые допы
+        if len(files_arr) != 0:
+            try:
+                with open(releasebranchlog + namePatch + '_deploy_dop_objects.txt', 'w') as file:
+                    string = 'deploy_dop_object'
+                    file.write(string)
+                    file.close()
+                    print('---File deploy_dop_object is created---')
+                    print('---------output from --output from release_branch -----------')
+                with open(releasebranchlog + namePatch + '_deploy_dop_objects.txt', 'r') as file:
+                    print(*file)
+                    file.close()
+            except:
+                print('---I cant create file deploy_dop_object---')
+ 
+            for commit in del_files_arr:
+                for file in del_files_arr[commit]:
+                    string = str(file)
+                    del_files_list.append(string)
+                    print('---string for deleted file---')
+                    print(string)
+                    string = ''
+            print('---list of deleted files---')
+            print(del_files_list)
+ 
+            print('---files array:---')
+            print(files_arr)
+        else:
+            print('---no files with changes or deleted files---')
+            continue
+        print('---try to checkout to release---')
+        repo.git.checkout(release_branch)
+ 
+        print('---Repository active branch is {}'.format(repo.active_branch))
+        branch = branch.replace('feature/', '')
+        # branch = branch.replace(f'{target_branch}/', '')
+        branches_with_changes.append(branch)
+        branches_to_merge.append(branch)
+   
+        
+    if len(all_copy_files) != 0:
+        print('----all copy files----')
+        print(all_copy_files) 
+ 
+        # Формирование массива arr_send с задачами и файлами из массива all_copy_files
+        temp_arr = []
+        key_task = ""
+        arr_send = []
+ 
+        for key in all_copy_files:
+            print('---item_ key---')
+            print(key)
+ 
+            if key_task != all_copy_files[key]:
+                items_ = all_copy_files[key]
+                key_task = ''.join(items_[1])
+            for item_ in items_[0]:
+                # unique_list = []
+                if key_task == items_[1]:
+                    if len(item_) != 0:
+                        if item_ not in del_files_list:
+                            date_commit = (key.strftime("%d-%m-%Y"))
+                            date_format = '%d-%m-%Y'
+                            print("date: ", date_commit)
+                            # date_commit_date = datetime.datetime.strptime(date_commit, date_format)
+                            date_commit_date = datetime.strptime(date_commit, date_format)
+                            temp_arr = {"date_commit": date_commit_date, "task": key_task, "file_ch": item_}
+                    # temp_arr = []
+                    if len(temp_arr) != 0: arr_send.append(temp_arr)
+            temp_arr = []
+ 
+        # od = collections.OrderedDict(sorted(d.items(), key=lambda t: t[0], reverse=False))
+ 
+        print("---files before deduplication---")
+        for item in arr_send:
+            if ' =>' in item['file_ch']:
+                if '{' and '}' in item['file_ch']:
+                    pattern = re.compile(r'{')
+                    parts = pattern.split(item['file_ch'])
+                    string1 = ''.join(parts[0])
+                    string2 = ''.join(parts[1])
+                    string3 = string2.split('=>')
+                    string4 = ''.join(string3[1])
+                    string4 = string4.replace('}', '')
+                    string4 = string4.replace(' ','')
+                    ren_files = string1 + string4
+                    item['file_ch'] = ren_files
+                else:
+                    ren_files = item['file_ch'].split(' => ')
+                    item['file_ch'] = ren_files[1]
+ 
+        #sorted(arr_send, key=0lambda arr_commit: arr_commit[0])
+        arr_send.sort(key=lambda arr_commit: arr_commit['date_commit'])
+        print("---sorted arr_send---")
+        print(arr_send)
+        # sorted(arr_send, key=itemgetter(0))
+ 
+        # Поиск дублей задач с файлами
+        unique_items = []
+        for item in arr_send:
+            if item not in unique_items:
+                unique_items.append(item)
+        arr_send = unique_items
+        print('--arr_send---')
+        print(arr_send)
+ 
+        # sorted_arr_send
+        # поиск дублей файлов, оставляем последние коммиты
+        reversed_arr_send = arr_send[::-1]
+        li = []
+        new_arr_send = []
+ 
+        for i in reversed_arr_send:
+            if i['file_ch'] not in li:
+                li.append(i['file_ch'])
+                print(f'{i["task"]} - {i["file_ch"]}')
+                new_arr_send.append(i)
+ 
+       arr_send = []
+        arr_send = new_arr_send[::-1]
+        print(len(arr_send))
+ 
+        print('---filtered arr_send---')
+        for item in arr_send:
+            print(f"{item['task']} - {item['file_ch']} ")
+   
+    
+        tmp_text = ''
+        for item in arr_send:
+            tmp_text = tmp_text + item['task'] + ':' + item['file_ch'] + '\n'
+        print('----tmp_text---')
+        print(tmp_text)
+ 
+        f = open(releasebranchlog + namePatch + '_deploy_dop_objects.txt', 'w')
+        f.write(tmp_text)
+        f.close()
+   
+   
+    # Копирование файлов
+    print('---all copy files---')
+ 
+    for key,value in sorted(all_copy_files.items()):
+            print(key, '->',value)
+            print(value[1])
+            repo.git.checkout(value[1])
+            print('---Repository active branch is {} for copy files in temp dir'.format(repo.active_branch))
+            for file in value[0]:
+ 
+                file_name = "".join(file)
+ 
+                if ' =>' in file_name:
+                    if '{' and '}' in file_name:
+                        pattern = re.compile(r'{')
+                        parts = pattern.split(file_name)
+                        string1 = ''.join(parts[0])
+                        string2 = ''.join(parts[1])
+                        string3 = string2.split('=>')
+                        string4 = ''.join(string3[1])
+                        #string2 = ''.join(parts[1].replace('}','')).split('=>')
+                        string4 = string4.replace('}', '')
+                        string4 = string4.replace(' ','')
+ 
+                        ren_files = string1 + string4
+                        file_name = ren_files
+                    else:
+                        ren_files = file_name.split(' => ')
+                        file_name = ren_files[1]
+ 
+                else:
+                    file = file_name
+ 
+                source_file = repo_str + file
+                print('---source file---')
+                print(source_file)
+               
+                #print('----type----')
+                #print(type(value[0]))
+               
+                string =  '\n' +''.join(value[0]) + ':' + ''.join(value[1])
+                #with open('/tmp/siebel-deploy/releasebranchlog/tasks_date.txt', 'a') as file_:
+                #    file_.write(string)
+                #    file_.close()
+                dest_file = temp_for_git_str + file
+                print('---dest file---')
+                print(dest_file)
+                s = pathlib.PurePath(dest_file)
+                for down in reversed(s.parents):
+                    if not os.path.exists(down):
+                        os.mkdir(down)
+                        print('---dir created: ' + str(down) + '---')
+                try:
+                    if os.path.isfile(source_file):
+                        shutil.copyfile(source_file, dest_file)
+                        print("---copy successfully to directory (temp_for_git):---")
+                        # copy_files_list.append(source_file)
+                        for filename in os.listdir(temp_for_git_str):
+                            print(filename)
+                    else:
+                        print('---file ' + dest_file + ' doesnt exist---')
+                        j = 0
+                        for item in arr_send:
+                            if file_name in item['file_ch']:
+                                arr_send.pop(j)
+                            else:
+                                j += 1
+                except:
+                    print('--I cant copy---')
+                    print(filename)
+                    continue
+ 
+            #print('-------file tasks_date.txt--------')
+            #with open('/tmp/siebel-deploy/releasebranchlog/tasks_date.txt','r') as file_:
+            #    for line in file_:
+            #        print(line)
+            #    file_.close();   
+            #print('--------------------------')
+            repo.git.checkout(target_branch)
+ 
+    repo.git.checkout(release_branch)
+    print('---Repository active branch is {} for copy files in temp dir'.format(repo.active_branch))
+    if len(branches_with_changes) != 0:
+ 
+        root_src_dir = temp_for_git_str  # Path/Location of the source directory
+        root_dst_dir = repo_str  # Path to the destination folder
+        # копирование файлов
+        print('---start files coping to temp dir---')
+        for src_dir, dirs, files in os.walk(root_src_dir):
+            dst_dir = src_dir.replace(root_src_dir, root_dst_dir, 1)
+            if not os.path.exists(dst_dir):
+                os.makedirs(dst_dir)
+            for file_ in files:
+                src_file = os.path.join(src_dir, file_)
+                dst_file = os.path.join(dst_dir, file_)
+                if os.path.exists(dst_file):
+                    os.remove(dst_file)
+                shutil.copy(src_file, dst_dir)
+ 
+        # удаление файлов по списку del_files_list
+        for file2 in del_files_list:
+            try:
+                os.remove(repo_str + file2)
+                print('---file ' + file2 + ' was deleted---')
+            except:
+                print('---I cant delete file ' + file2 + '---')
+ 
+        print('---git add---1')
+        print("---Jira tasks with changes: ", ' '.join(str(x) for x in branches_to_check))
+        try:
+            # print(f'try to merge {release_branch} with {target_branch} ...')
+            print('---git add---2')
+            try:
+                print('---git add 2 successfull---')
+                repo.git.add(all=True)
+                repo.index.commit(' '.join(str(x) for x in branches_with_changes) + ' Merge in ' + release_branch)
+            except:
+                print('---git add 2 failed---')
+            print('push changes...')
+            try:
+                repo.git.push("origin", release_branch)  # 26/01/2023 восстановить для прода
+                print('---push to release branch successfull---')
+            except:
+                print('---I cant push to release branch---')
+                # repo.git.push("origin",target_branch)
+            print('Push done.')
+            # print(len(str(files_with_conflict)))
+            print('----release_branch tasks-----')
+            print(branches_with_changes)
+            print(branches_to_merge)
+            text = 'Имя патча: ' + namePatch + '\\nСреда: ' + env + '\\nСтатус: Релизная ветка создана - ' + release_branch + '\\nСписок задач:\\n' + ' '.join(
+                str(x) for x in branches_to_merge)
+        except Exception as e:
+            text = 'Имя патча: ' + namePatch + '\\nСреда: ' + env + '\\nСтатус: Ошибка на этапе создания ветки ' + release_branch + '\\nПросьба проверить логи .\\nСписок задач:\\n' + ' '.join(
+                str(x) for x in branches_to_check)
+ 
+    else:
+       # release_branch = target_branch
+        print(f'No branches to merge, nothing to commit')
+ 
+ 
+    if len(arr_send) != 0:
+        # Формирование html-файла с копируемыми файлами
+        #        arr_send = []  # список с задачами и файлами
+        print('--start create html file with files from all_copy_files---')
+        html_text = ''
+        html_text = '<h2 style = "color: #fd2e2e;">Добавленные файлы</h2> <h1>Релизная ветка: ' + release_branch + '</h1><table border="1" cellpadding = 5px> <tr style="background-color: lightblue;"> <th>Задача</th><th>Файл</th></tr>'
+        temp_arr = []
+        key_task = ""
+ 
+        for item in arr_send:
+            html_text = html_text + '<tr> <td>' + item['task'] + '</td><td>' + item['file_ch'] + '</td></tr>'+ '\n'
+        html_text = html_text + '</table>'
+ 
+        f = open(html_file, "w")
+        f.write(html_text)
+        f.close()
+ 
+    # ****************************************************************************************
+    # Добавление файла c именем патча и задачами в releasebranchlog
+    # ***************************************************************************************
+    os.chdir('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/')
+    print("---files in releasebranchlog:---", os.listdir())
+    if os.path.isfile(releasebranchlog + namePatch):
+        try:
+            print('---Try to remove ' + namePatch + ' ---')
+            os.remove(releasebranchlog + namePatch)
+            print('----sucess removed ' + namePatch + ' ----')
+        except:
+            print('I cant remove ' + namePatch)
+ 
+    try:
+        with open(releasebranchlog + namePatch, 'w') as file:
+            string2 = ' '.join(branches_to_merge)
+            print('---string----: ' + string2)
+            file.write(string2)
+            file.close()
+            print('---release_branch file path:---')
+            print(releasebranchlog + namePatch)
+            print('---------output from release_branch ----------')
+        with open(releasebranchlog + namePatch, 'r') as file:
+            print(*file)
+            file.close()
+    except:
+        print('---I cant create file with tasks---')
+    if text != '':
+       sendStatusTelegram(namePatch, text)
+    try:
+        with open('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/' +namePatch +'_env.groovy', 'w') as f:
+            f.write(f'env.RELEASE_BRANCH="{release_branch}"\n')
+    except:
+        print('----I cant write to env.groovy---')
+ 
+    try:
+        with open('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/' +namePatch +'_env.groovy','a') as f:
+            f.write("env.GIT_TASKS=" + "\"" + f'{branches_to_merge}' + '\"\n')
+    except:
+        print('----I cant write to env.groovy 2---')
+   
+    print('---env.groovy:---')
+    try:
+        with open('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/' +namePatch +'_env.groovy', 'r') as f:
+            print(*f)
+    except:
+        print("I cant read file goovy.env")
+ 
+ 
+ 
+def mergeReleaseBranch(namePatch):
+    import git
+    now = datetime.now()
+    os.chdir('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/')
+    print("---files in releasebranchlog:---", os.listdir())
+    print('---------output from release_branch (merge_release_branch) ----------')
+    with open(releasebranchlog + namePatch, 'r') as file:
+        print(*file)
+        file.close()
+   
+    print('---merge release branch start---')
+    print('---size of file /tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/' + namePatch + ' ---')
+    file_size = 0
+   
+    file_size = os.stat('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/' + namePatch).st_size
+    print(file_size)
+    if file_size == 0:
+        print('----there is no tasks in file----')
+        return
+    else:
+        try:
+            with open('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/' + namePatch, 'r') as file:
+                branches_to_merge = []
+                str_branches_to_merge = file.readline()
+                branches_to_merge = str_branches_to_merge.split(' ')
+                print('--try to load branches name from file---(merge release branch)')
+                print(*file)
+                file.close()
+                print('----branches to merge (load from file)------')
+                print(branches_to_merge)
+        except:
+            print('I cant read file with tasks')
+    print('----branches to merge------')
+    print(branches_to_merge)
+    print('---target branch:----')
+    target_branch = os.environ["ENVIRONMENT"]
+    print(target_branch)
+    release_branch = os.environ["RELEASE_BRANCH"]
+    print('---release branch:----')
+    print(release_branch)
+    repo = git.Repo('/tmp/siebel-deploy/siebel-nrt')
+    print('------ merge release: set repo creds using AD-------')
+    repo.config_writer().set_value("credential", "username", os.environ["GITLAB_USER"]).release()
+    repo.config_writer().set_value("credential", "helper", '"!f() { echo password=${GITLAB_PASS}; }; f"').release()
+    for remote in repo.remotes:
+        remote.fetch()
+    repo.git.reset('--hard')
+    for b in repo.remote().fetch():
+        repo.git.checkout('-B', b.name.split('/', 1)[1], '--track', b.name)
+    print('---try to checkout release branch--merge release branch---')
+    print(repo.git.checkout(release_branch))
+    print('-----active branch is: {} before git pull in merge release branch procedure-----'.format(repo.active_branch))
+    print(repo.git.pull())
+    if target_branch != release_branch:
+        try:
+            # print(f'try to merge {release_branch} with {target_branch} ...')
+            repo.git.checkout(target_branch)
+            repo.git.merge('-m', f'auto merge with {release_branch}', release_branch)
+            repo.git.push("origin", target_branch)
+            # ****************************************************************************************
+            # Добавление файла и метки Task installed в ветки разработчиков
+            # ***************************************************************************************
+            print('---branches to merge:' + str(branches_to_merge) + '---')
+            for branch in branches_to_merge:
+                branch = 'feature/' + branch
+                repo.git.checkout(branch)
+                print('-----Repository active branch is {} before commit adding:------'.format(repo.active_branch))
+                string = str(
+                    'Task installed to ' + os.environ["ENVIRONMENT"] + ' '+ branch.replace("feature/", '') + ' ' + str(now))
+                print('---string----:')
+                print(string)
+ 
+                if os.path.isfile('/tmp/siebel-deploy/siebel-nrt/installed.txt'):
+                    os.remove('/tmp/siebel-deploy/siebel-nrt/installed.txt')
+                    print('----sucess remove installed.txt----')
+               else:
+                    print("----File installed.txt doesnt exists!----")
+                    with open('/tmp/siebel-deploy/siebel-nrt/installed.txt', 'w') as file:
+                        file.write('Task installed')
+                        file.close()
+                        print('---------output from installed.txt:----------')
+                    with open('/tmp/siebel-deploy/siebel-nrt/installed.txt', 'r') as file:
+                        print(*file)
+                        file.close()
+                # if repo.is_dirty(untracked_files=True):
+                print('----Changes in repo ' + str(branch) + ' detected----')
+                print('---------try to add commit about installed task, branch: ' + str(branch) + ' ----------')
+                # try:
+                #     print('-----Try to add installed.txt to index using python-----')
+                #    # os.chdir('/tmp/siebel-deploy/siebel-nrt/')
+                #    repo.index.add('--ignore-removal', 'installed.txt')
+                # except:
+                #     print('I cant add index using Python')
+                #try:
+                #    print('-----try to add commit about installed task using shell-----')
+                #    os.chdir('/tmp/siebel-deploy/siebel-nrt/')
+                #    os.system("git add installed.txt")
+                #except:
+                #   print('---I cant add commit about installed task using shell---')
+                try:
+                    print('-----try to add commit about installed task using python-----')
+                    repo.index.commit(string)
+                except:
+                    print('---I cant add index using python---')                   
+                print('---I try to push about installed task---')
+                try:
+                    print('-----Repository active branch is {} before commit adding:------'.format(repo.active_branch))
+                    repo.git.push("origin", branch)
+                except:
+                    print('---I cant push commit about installed task---')
+ 
+        except Exception as e:
+            print(e)
+    else:
+        print(f'No branches to merge, nothing to commit')
+ 
+ 
+def addDevelopmentObjectLabel(namePatch):
+    print('---add Development ObjectLabel start---')
+##    # Проверка файла с названием патча
+##    file_size = 0
+##    file_size = os.stat('/tmp/siebel-deploy/releasebranchlog/' + namePatch).st_size
+##    print(file_size)
+##    if file_size > 0:
+##        try:
+##            with open('/tmp/siebel-deploy/releasebranchlog/' + namePatch, 'r') as file:
+##                str_jira_tasks = file.readline()
+##                tasksName = str_jira_tasks.split(' ')
+##                print(*file)
+##                file.close()
+##                print('----taskName _add development_object_label------')
+##                print(tasksName)
+##        except:
+##            print('I cant read file with tasks')
+##    else:
+##        print('----there is no file with tasks----')
+##        taskName = [];
+ 
+   
+ 
+###    if os.getenv("GIT_TASKS") is not None:
+###        print('--(add development object label)---')
+###        try:
+###            git_tasks = eval(os.environ["GIT_TASKS"])
+###        except:
+###            print('addDevelopmentObjectLab error 0')
+###    else:
+###        git_tasks = []
+###        print('---os env git task not found (add development object label)---')
+###   
+###    if (os.environ["SKIP_CREATE_SIEBEL_PATCH"] != 'true' or os.environ[
+###        "THE_PATCH_IN_ROCKET_SIEBEL_ALREADY_BEEN_BUILT"] != 'No') and not os.path.exists(releasebranchlog + namePatch + '_no_tasks_rocket.txt'):
+###        try:
+###            tasksName = getTaskFromPatchRS(namePatch)
+###            tasksName = mergeRSTaskWithJira(tasksName)
+###        except:
+###            print('---addDevelopmentObjectLab error 1 ')
+###        print('---taskName---')
+###        print(tasksName)
+###        print(type(tasksName))
+###        for task in tasksName:
+###            if task != '':
+###                print('---add development object label for task Jira_rocket')
+###                addDevelopmentObjectLabelFinal(namePatch, task)
+    if os.path.exists(releasebranchlog + namePatch + '_task_success_patch.txt'):
+        tasksName = ''
+        try:
+            with open('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/' + namePatch + '_task_success_patch.txt', 'r') as file:
+                str_jira_tasks = file.readline()
+                tasksName = str_jira_tasks.split(' ')
+                print('----taskName for add development object label ------')
+                print(tasksName)
+                file.close()
+                for task in tasksName:
+                    if task != '':
+                        print('---task successfully before add development object label Jira')
+                        addDevelopmentObjectLabelFinal(namePatch, task)        
+        except:
+               print('No tasks successfully installed')
+ 
+    if os.path.exists(releasebranchlog + namePatch + '_task_partially_patch.txt'):
+        tasksName = ''
+        try:
+            with open('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/' + namePatch + '_task_partially_patch.txt', 'r') as file:
+                str_jira_tasks = file.readline()
+                tasksName = str_jira_tasks.split(' ')
+                print('----taskName for add development object label ------')
+                print(tasksName)
+                file.close()
+                for task in tasksName:
+                    if task != '':
+                        print('---task partially successfully before add development object label Jira')
+                        addDevelopmentObjectLabelFinal(namePatch, task)        
+        except:
+               print('No tasks partially successfully installed')
+ 
+    if os.path.exists(releasebranchlog + namePatch + '_task_error_patch.txt'):
+        tasksName = ''
+        try:
+            with open('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/' + namePatch + '_task_error_patch.txt', 'r') as file:
+                str_jira_tasks = file.readline()
+                tasksName = str_jira_tasks.split(' ')
+                print('----taskName for add development object label ------')
+                print(tasksName)
+                file.close()
+                for task in tasksName:
+                    if task != '':
+                        print('---task error before add development object label Jira')
+                        addDevelopmentObjectLabelFinal(namePatch, task)        
+        except:
+               print('No tasks installed with error')
+ 
+###    else:
+###        try:
+###            with open('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/'  + namePatch, 'r') as file:
+###                str_jira_tasks = file.readline()
+###                tasksName = str_jira_tasks.split(' ')
+###                print('----taskName for add development object label Dop Without Rocket------')
+###                print(tasksName)
+###                file.close()
+###                for task in tasksName:
+###                    if task != '':
+###                        print('---task before add development object label Jira_Dop Without Rocket')
+###                        addDevelopmentObjectLabelFinal(namePatch, task)
+###        except:
+###            print('No tasks from RocketSiebel and from Git')   
+ 
+##    if os.environ["SKIP_CREATE_SIEBEL_PATCH"] != 'true' or os.environ[
+##        "THE_PATCH_IN_ROCKET_SIEBEL_ALREADY_BEEN_BUILT"] != 'No':
+##        try:
+##            tasksName = getTaskFromPatchRS(namePatch)
+##            print('--- get taskName from get_TaskFromPatchRS---')
+##            print(taskName)
+##            tasksName = mergeRSTaskWithJira(tasksName)
+##            print('--- get taskName from merge_TaskFromPatchRS---')
+##            print(taskName)
+##
+##        except:
+##            print('---I cant get taskName from getTaskFromPatchRS---')
+##    else:
+##        tasksName = []
+##        tasksName.extend(git_tasks)
+##        tasksName = list(set(tasksName))
+##        print('----taskName------')
+##        print(tasksName)
+def addDevelopmentObjectLabelFinal(namePatch, task):
+    authData = {'username': os.environ['JIRA_USER'], 'password': os.environ['JIRA_PASS']}
+    print('---authData----')
+    print(authData)
+ 
+    try:
+        reqJira = requests.Session()
+        reqJira.verify = False
+        reqJira.post(url=jiraURL + '/rest/auth/1/session', json=authData)
+    except:
+        print('---I cant reqJiraPost---')
+ 
+##    print('----task in/ taskName--------')
+##    print(tasksName)
+##    print(type(tasksName))
+##    for task in tasksName:
+##        print('----task:----')
+##        print(task)
+    jsonData = {'update': {'customfield_10501': [{'add': namePatch}]}}
+    response = reqJira.put(url=jiraURL + '/rest/api/2/issue/' + task, json=jsonData)
+    print('-----jsonData-------')
+    print(jsonData)
+    print('-----response--------')
+    print(response)
+ 
+def sendCommentJiraFinal(namePatch):
+    print('---sendCommentJiraFinal run----')
+###    if os.getenv("GIT_TASKS") is not None:
+###        print('---os env git task found (send comment jira final)---')
+###        git_tasks = eval(os.environ["GIT_TASKS"])
+###        print('--git tasks from os environment:---')
+###        print(str(git_tasks))
+###        print(type(git_tasks))
+###    else:
+###        git_tasks = []
+###        print('---os env git task not found (send comment jira final)---')
+###    if (os.environ["SKIP_CREATE_SIEBEL_PATCH"] != 'true' or os.environ[
+###        "THE_PATCH_IN_ROCKET_SIEBEL_ALREADY_BEEN_BUILT"] != 'No') and not os.path.exists(releasebranchlog + namePatch + '_no_tasks_rocket.txt'):
+###        tasksName = getTaskFromPatchRS(namePatch)
+###        tasksName = mergeRSTaskWithJira(tasksName)
+###        print('---taskName---')
+###        print(tasksName)
+###        print(type(tasksName))
+###        for task in tasksName:
+###            if task != '':
+###                print('---task before sendCommentJira_rocket')
+###                sendCommentJira(task, "Rocket siebel object installed to " + "{{ target_environment }}")
+    if os.path.exists(releasebranchlog + namePatch + '_success_dop_task_patch.txt'):
+        tasksName = ''
+        try:
+            with open('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/' + namePatch + '_success_dop_task_patch.txt', 'r') as file:
+                str_jira_tasks = file.readline()
+                tasksName = str_jira_tasks.split(' ')
+                print('----taskName for sendCommentJiraFinal------')
+                print(tasksName)
+                file.close()
+                for task in tasksName:
+                    if task != '':
+                        print('---task success dop before sendCommentJira')
+                        sendCommentJira(task, "Dops objects installed to " + "{{ target_environment }}")       
+        except:
+               print('No Dops tasks successfully installed')
+ 
+    if os.path.exists(releasebranchlog + namePatch + '_partially_success_dop_task_patch.txt'):
+        tasksName = ''
+        try:
+            with open('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/' + namePatch + '_partially_success_dop_task_patch.txt', 'r') as file:
+                str_jira_tasks = file.readline()
+                tasksName = str_jira_tasks.split(' ')
+                print('----taskName for sendCommentJiraFinal------')
+                print(tasksName)
+                file.close()
+                for task in tasksName:
+                    if task != '':
+                        print('---task partially success dop before sendCommentJira')
+                        sendCommentJira(task, "Dops objects partially installed to " + "{{ target_environment }}")   
+        except:
+               print('No Dops tasks partially successfully installed')
+ 
+    if os.path.exists(releasebranchlog + namePatch + '_error_dop_task_patch.txt'):
+        tasksName = ''
+        try:
+            with open('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/' + namePatch + '_error_dop_task_patch.txt', 'r') as file:
+                str_jira_tasks = file.readline()
+                tasksName = str_jira_tasks.split(' ')
+                print('----taskName for sendCommentJiraFinal------')
+                print(tasksName)
+                file.close()
+                for task in tasksName:
+                    if task != '':
+                        print('---task error dop before sendCommentJira')
+                        sendCommentJira(task, "Dops objects installed with error to " + "{{ target_environment }}")   
+        except:
+               print('No Dops tasks installed with error')
+ 
+    if os.path.exists(releasebranchlog + namePatch + '_success_rs_task_patch.txt'):
+        tasksName = ''
+        try:
+            with open('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/' + namePatch + '_success_rs_task_patch.txt', 'r') as file:
+                str_jira_tasks = file.readline()
+                tasksName = str_jira_tasks.split(' ')
+                print('----taskName for sendCommentJiraFinal------')
+                print(tasksName)
+                file.close()
+                for task in tasksName:
+                    if task != '':
+                        print('---task success rs before sendCommentJira')
+                        sendCommentJira(task, "RocketSiebel objects installed to " + "{{ target_environment }}")   
+        except:
+               print('No RocketSiebel tasks successfully installed')
+ 
+    if os.path.exists(releasebranchlog + namePatch + '_partially_success_rs_task_patch.txt'):
+        tasksName = ''
+        try:
+            with open('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/' + namePatch + '_partially_success_rs_task_patch.txt', 'r') as file:
+                str_jira_tasks = file.readline()
+                tasksName = str_jira_tasks.split(' ')
+                print('----taskName for sendCommentJiraFinal------')
+                print(tasksName)
+                file.close()
+                for task in tasksName:
+                    if task != '':
+                        print('---task partially success rs before sendCommentJira')
+                        sendCommentJira(task, "RocketSiebel objects partially installed to " + "{{ target_environment }}")   
+        except:
+               print('No RocketSiebel tasks partially successfully installed')
+ 
+    if os.path.exists(releasebranchlog + namePatch + '_error_rs_task_patch.txt'):
+        tasksName = ''
+        try:
+            with open('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/' + namePatch + '_error_rs_task_patch.txt', 'r') as file:
+                str_jira_tasks = file.readline()
+                tasksName = str_jira_tasks.split(' ')
+                print('----taskName for sendCommentJiraFinal------')
+                print(tasksName)
+                file.close()
+                for task in tasksName:
+                    if task != '':
+                        print('---task error rs before sendCommentJira')
+                        sendCommentJira(task, "RocketSiebel objects installed with error to " + "{{ target_environment }}")   
+        except:
+               print('No RocketSiebel tasks installed with error')
+###    else:
+###        try:
+###            with open('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/' + namePatch, 'r') as file:
+###                str_jira_tasks = file.readline()
+###                tasksName = str_jira_tasks.split(' ')
+###                print('----taskName for sendCommentJiraFinal------')
+###                print(tasksName)
+###                file.close()
+###                for task in tasksName:
+###                    if task != '':
+###                        print('---task before sendCommentJira_Dop')
+###                        sendCommentJira(task, "Dops objects installed to " + "{{ target_environment }}")
+###        except:
+###            print('No tasks from RocketSiebel and from Git')
+ 
+def setStatusTasks(namePatch, listWF):
+###    if (os.environ["SKIP_CREATE_SIEBEL_PATCH"] != 'true' or os.environ[
+###        "THE_PATCH_IN_ROCKET_SIEBEL_ALREADY_BEEN_BUILT"] != 'No') and not os.path.exists(releasebranchlog + namePatch + '_no_tasks_rocket.txt'):
+###        tasksName = getTaskFromPatchRS(namePatch)
+###        tasksName = mergeRSTaskWithJira(tasksName)
+###        setStatusTasksFinal(listWF, tasksName)
+    if os.path.exists(releasebranchlog + namePatch + '_task_success_patch.txt'):
+       tasksName = ''
+       try:
+           with open('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/' + namePatch + '_task_success_patch.txt', 'r') as file:
+               str_jira_tasks = file.readline()
+               tasksName = str_jira_tasks.split(' ')
+               print('----taskName for StatusJiraFinal------')
+               print(tasksName)
+               file.close()
+               for task in tasksName:
+                   if task != '':
+                       print('---task before StatusJiraFinal')
+                       setStatusTasksFinal(listWF, tasksName)          
+       except:
+              print('No successfully tasks from RocketSiebel and from Git')
+###    else:
+###        try:
+###            with open('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/' + namePatch, 'r') as file:
+###                str_jira_tasks = file.readline()
+###                tasksName = str_jira_tasks.split(' ')
+###                print('----taskName for StatusJiraFinal------')
+###                print(tasksName)
+###                file.close()
+###                for task in tasksName:
+###                    if task != '':
+###                        print('---task before StatusJiraFinal')
+###                        setStatusTasksFinal(listWF, tasksName) 
+###        except:
+###            print('No tasks from RocketSiebel and from Git')
+ 
+def setStatusTasksFinal(listWF, tasksName):
+    statusTaskList = listWF.split('; ')
+    statusTaskList[len(statusTaskList) - 1] = statusTaskList[len(statusTaskList) - 1].replace(";", "")
+    print(statusTaskList)
+ 
+    jira_options = {'server': jiraURL, 'verify': False}
+    jira = JIRA(
+        auth=(os.environ['JIRA_USER'], os.environ['JIRA_PASS']),
+        options=jira_options
+    )
+ 
+    for task in tasksName:
+        try:
+            issue = jira.issue(task)
+            transitions = jira.transitions(issue)
+ 
+            for status in statusTaskList:
+                for t in transitions:
+                    if t['name'] == status:
+                        jira.transition_issue(issue=issue, transition=t['id'])
+        except JIRAError as e:
+            print(task + " not found in Jira, setStatusTasks")
+ 
+ 
+def mergeRSTaskWithJira(rsTasks):
+    print('---debug Merge RSTask With Jira')
+    jira_options = {'server': jiraURL, 'verify': False}
+    jira = JIRA(
+        auth=(os.environ['JIRA_USER'], os.environ['JIRA_PASS']),
+        options=jira_options
+    )
+ 
+    allTasks = rsTasks
+    jiraAndLabel = dict()
+ 
+    if os.environ["ENVIRONMENT_MINOR"] == 'cert_minor':
+        tasks = jira.search_issues(jql_str="filter={{ jira_filter_minor }}")
+    elif os.environ["ENVIRONMENT_MINOR"] == 'nlt_minor':
+        tasks = jira.search_issues(jql_str="filter={{ jira_filter_nlt_minor }}")
+    elif os.environ["ENVIRONMENT_MINOR"] == 'cert_sas_ma':
+        tasks = jira.search_issues(jql_str="filter={{ jira_filter_sas_ma }}",maxResults=False)
+    elif os.environ["ENVIRONMENT_MINOR"] == 'prod_sas_ma':
+        tasks = jira.search_issues(jql_str="filter={{ jira_filter_sas_ma }}",maxResults=False)
+    else:
+        tasks = jira.search_issues(jql_str="filter={{ jira_filter }}")
+    for jiraTask in tasks:
+        issue = jira.issue(jiraTask.key)
+ 
+        if hasattr(issue.fields, 'customfield_13808') and issue.fields.customfield_13808 is not None and isinstance(issue.fields.customfield_13808, list):
+             jiraAndLabel[jiraTask.key] = []
+             for key in issue.fields.customfield_13808:
+                 jiraAndLabel[jiraTask.key].append(key)
+             break
+        break
+ 
+    for rsTask in rsTasks:
+        if rsTask not in allTasks:
+            for jiraLabel in jiraAndLabel:
+                for label in jiraAndLabel[jiraLabel]:
+                    if rsTask == label:
+                        allTasks.append(jiraLabel)
+    print(allTasks)
+    return allTasks
+ 
+ 
+#def sendStatusTelegram(patchName, text):
+#  tg_bot_token = os.environ["TG_DEBUG_BOT_TOKEN"]
+#  tg_group_id = os.environ["TG_DEBUG_GROUP_ID"]
+#  headers = {'Content-type': 'application/json'}
+#  body = '{"token":"' + tg_bot_token + '","id":"' + tg_group_id + '","text":"'+ text + '"}'
+#  body = body.encode('utf-8')
+#  url = '{{ tg_url }}'
+#  response = requests.post(url, headers=headers, data=body, verify=False)
+#  print('========================== SEND MESSAGE TELEGRAM ==========================')
+#  print(url)
+#  print(text)
+#  print(body)
+#  print(response)
+#  print(str(response.content))
+#  print('====================== END SEND MESSAGE TELEGRAM ==========================')
+ 
+ 
+def sendStatusTelegram(patchName, text):
+    tg_apim_consumer_key = 'ZENcFi0XaQKLJrtmkDD8uUb4PiUa'
+    tg_apim_consumer_secret = 'Jk8xiuj6FhGGasb632R8lC5veO0a'
+    token_url = 'https://apim-wso2am-test.trosbank.trus.tsocgen/oauth2/token?grant_type=client_credentials'
+    token_headers = {'Content-type': 'application/json'}
+    token_body = '{}'
+    token_body = token_body.encode('utf-8')
+    token_responce = requests.post(token_url, headers=token_headers, data=token_body, verify=False, auth=(tg_apim_consumer_key, tg_apim_consumer_secret))
+    token = str(token_responce.content).split('"')[3]
+#    print('====================== token ==========================')
+#    print(str(token_responce.content))
+    print('====================== token_split ==========================')
+    print(str(token_responce.content).split('"')[3])
+    tg_bot_token = '5460859544:AAF34WIey07QI_F86DpgaMmzgBIgEUXgnkg'
+    tg_group_id = '-1001686628705'
+    headers = {'Content-type': 'application/json', 'AuthorizationWSO': 'Bearer ' + token}
+    body = '{"token":"' + tg_bot_token + '","id":"' + tg_group_id + '","text":"' + text + '"}'
+    body = body.encode('utf-8')
+    url = 'https://apigw-wso2cc-test.apps.tpaas.trosbank.trus.tsocgen/Telegram/3.0/sendmessage'
+    response = requests.post(url, headers=headers, data=body, verify=False)
+    print('========================== SEND MESSAGE TELEGRAM ==========================')
+    print(url)
+    print(text)
+    print(body)
+    print(response)
+    print(str(response.content))
+    print('====================== END SEND MESSAGE TELEGRAM ==========================')
+ 
+ 
+# получаем все задачи из рокета
+def get_all_fws(env):
+    print("---Получим все задачи из Рокет---")
+    url = f"https://193.48.96.64/SiebelConfigurator/api/featureBranches/listnew/{env}"
+    print(url)
+    response = requests.get(url=url,
+                            auth=HTTPBasicAuth('admin',
+                                               'admin'), verify=False)
+    json_data = response.json()
+    # print('---json data---')
+    # print(json_data)
+    for name in json_data:
+        feature = (name["featureName"])
+        # print(feature)
+ 
+        all_wfs.append(feature)
+    print(f"Всего задач в Рокет: {len(all_wfs)}")
+ 
+# Получаем wf по имени задачи из рокета
+def get_fws(task):
+    # print(f"проверяем {task}")
+    # SPT-17770-TEST
+    # url = f"https://193.48.96.64/SiebelConfigurator/api/featureBranches/diffnew/my/objectNames/dev:{task}"
+    url = f"https://193.48.96.64/SiebelConfigurator/api/featureBranches/diffnew/internal/dev:{task}"
+    wfs = []
+    response = requests.get(url=url,
+                            auth=HTTPBasicAuth('admin',
+                                               'admin'), verify=False)
+    json_state = response.status_code
+ 
+    if json_state == 200:
+        json_data = response.json()
+ 
+        for name in json_data:
+            objects = (name["items"][0]["items"])
+            for object in objects:
+                for k, v in object.items():
+ 
+                    # print(f"{k}, {v}")
+                    if v == "Workflow Process":
+                        for l, m in object.items():
+                            if l == 'items':
+                                for wf in m:
+                                    #print(wf["name"])
+                                    wfs.append(wf["name"])
+                                # print(len(m))
+    return wfs
+ 
+# Получение задач, включенных в поставку из джиры
+def getIssueFromJira2(filter):
+    jira_options = {'server': "https://jenkins.rosbank.rus.socgen/jira", 'verify': False}
+    jira = JIRA(
+        auth=("rb187073", "uB21kDnp65*"),
+        options=jira_options
+    )
+    tasks = jira.search_issues(jql_str=f"filter={filter}", maxResults=False)
+    print(f"Задачи из Джира: {tasks}")
+    return tasks
+ 
+def getAllFromJira(project):
+    jira_options = {'server': "https://jenkins.rosbank.rus.socgen/jira", 'verify': False}
+    jira = JIRA(
+        auth=("rb187073", "uB21kDnp65*"),
+        options=jira_options
+    )
+    # print(f"---Получим все задачи из Jira в проекте : {project}---")
+    statuses = f'project="{project}" AND (status = "{statuses_SPT[0]}"'
+    for status in statuses_SPT[1:]:
+        statuses = statuses + f' OR status = "{status}"'
+    statuses = statuses + ')'
+    all_tasks = jira.search_issues(f'{statuses}', maxResults=False)
+    # print(f"Всего задач в проекте Jira {project}: {(str(len(all_tasks)))}")
+    return all_tasks
+ 
+    # for task in all_tasks:
+    # pass
+    # print(task)
+    # return all_tasks
+ 
+# получаем атрибуты задачи из джиры (статус, тип задачи, время создания задачи)
+def getStatusFromJira(task):
+    jira_options = {'server': "https://jenkins.rosbank.rus.socgen/jira", 'verify': False}
+    jira = JIRA(
+        auth=("rb187073", "uB21kDnp65*"),
+        options=jira_options
+    )
+    #  print(f"---start getting status of task {task}---")
+ 
+    new_issue = jira.search_issues("id = " + task, startAt=0, maxResults=False)
+    for issue in new_issue:
+        task_stat = []
+        key = issue.key
+        issue = jira.issue(key, fields="status, created, issuetype")
+        stat2 = issue.fields.status
+        task_date = issue.fields.created
+        task_type = issue.fields.issuetype
+        task_stat.append(stat2)
+        task_stat.append(task_date)
+        task_stat.append(task_type)
+        #print('***type***')
+        #print(task_type)
+        # print(task_date)
+        # task_stat.append(stat2, task_date)
+        # = {stat2, task_date}
+        # print(task_stat)
+    return task_stat
+ 
+def return_pr(task1, task_1):
+    # print(task1)
+    stop = "-"
+    pr = (re.search(fr'(.+?){stop}', task1).group(1))
+    if pr == 'SPT' or pr == 'CRM' or pr == 'PCCRM':
+        # print(check_status_1)
+        # print(statuses_SPT.index(task_1.upper()))
+        #if task_1 == 'PCCRM-8176':
+        #    return 5
+        return statuses_SPT.index(task_1.upper())
+    if pr == 'CARD':
+        # print(check_status_1)
+        # print(statuses_SPT.index(task_1.upper()))
+        return statuses_CARD.index(task_1.upper())
+    if pr == 'CARD':
+        # print(check_status_1)
+        # print(statuses_SPT.index(task_1.upper()))
+        return statuses_CARD.index(task_1.upper())
+    if pr == 'TFP':
+        # print(check_status_1)
+        # print(statuses_SPT.index(task_1.upper()))
+        return statuses_CARD.index(task_1.upper())
+ 
+ 
+ 
+ 
+ 
+def sendCommentTelegram(namePatch):
+      deployResult = os.environ["MY_RESULT"]
+      env = os.environ["ENVIRONMENT"]
+      env = env.upper()
+      building_release_branch = ''
+      tasksName_success = ''
+      tasksName_part_success = ''
+      tasksName_error = ''
+      if os.environ["MY_RESULT"] == 'SYNC':
+        text = 'Имя патча: ' + namePatch +'\\nДиректории синхронизированы ✅'
+        sendStatusTelegram(namePatch, text)
+     elif os.environ["MY_RESULT"] == 'ABORTED':
+        text = 'Имя патча: ' + namePatch + '\\nСреда: ' + env + '\\nСтатус: ◼ Работа конвейера остановлена.'
+        sendStatusTelegram(namePatch, text)
+      elif os.environ["MY_RESULT"] =='FAILURE':
+        text = 'Имя патча: ' + namePatch + '\\nСреда: ' + env + '\\nСтатус: ❌ Произошёл сбой в работе конвейера. \\nПоставка не была завершена. Просьба проверить логи конвейера.'
+        sendStatusTelegram(namePatch, text)
+      else:
+          if (os.environ["SKIP_SET_STATUS_TASKS_IN_JIRA"] != 'false' and env == 'PROD'):
+                  print('Building release branch for' + env)
+                  building_release_branch = 'Сборка релизной ветки'
+                  tasksName = ''
+                  sendCommentTelegramFinel(namePatch, deployResult, env, tasksName_success, tasksName_part_success, tasksName_error, building_release_branch)
+          else:
+              ###if (os.environ["SKIP_CREATE_SIEBEL_PATCH"] != 'true' or os.environ[
+              ###  "THE_PATCH_IN_ROCKET_SIEBEL_ALREADY_BEEN_BUILT"] != 'No') and not os.path.exists(releasebranchlog + namePatch + '_no_tasks_rocket.txt'):
+              ###        tasksName = getTaskFromPatchRS(namePatch)
+              if (os.path.exists(releasebranchlog + namePatch + '_task_success_patch.txt') or os.path.exists(
+                                 releasebranchlog + namePatch + '_task_partially_patch.txt') or os.path.exists(releasebranchlog + namePatch + '_task_error_patch.txt')):
+                      if os.path.exists(releasebranchlog + namePatch + '_task_success_patch.txt'):
+                           tasksName_success = ''
+                           try:
+                               with open('/tmp/siebel-deploy/releasebranchlog/' + "{{ target_environment }}" + '/' + namePatch + '/' + namePatch + '_task_success_patch.txt', 'r') as file:
+                                   str_jira_tasks = file.readline()
+                                   tasksName_success = str_jira_tasks.split(' ')
+                                   print('----Successfully taskName for sendCommentTelegram------')
+                                   print(tasksName_success)
+                                   file.close()
+                                   #tasksName = tasksName + tasksName_git
+                                   #sendCommentTelegramFinel(namePatch, deployResult, env, tasksName, building_release_branch)
+                           except:
+                               print('No tasks Successfully')
+                      if os.path.exists(releasebranchlog + namePatch + '_task_partially_patch.txt'):
+                           tasksName_part_success = ''
+                           try:
+                               with open('/tmp/siebel-deploy/releasebranchlog/' + "{{ target_environment }}" + '/' + namePatch + '/' + namePatch + '_task_partially_patch.txt', 'r') as file:
+                                   str_jira_tasks = file.readline()
+                                   tasksName_part_success = str_jira_tasks.split(' ')
+                                   print('----Partially Successfully taskName for sendCommentTelegram------')
+                                   print(tasksName_part_success)
+                                   file.close()
+                           except:
+                               print('No tasks Partially Successfully')
+                      if os.path.exists(releasebranchlog + namePatch + '_task_error_patch.txt'):
+                           tasksName_error = ''
+                           try:
+                               with open('/tmp/siebel-deploy/releasebranchlog/' + "{{ target_environment }}" +  '/' + namePatch +'/' + namePatch + '_task_error_patch.txt', 'r') as file:
+                                   str_jira_tasks = file.readline()
+                                   tasksName_error = str_jira_tasks.split(' ')
+                                   print('----Error taskName for sendCommentTelegram------')
+                                   print(tasksName_error)
+                                   file.close()
+                           except:
+                               print('No tasks with Error')
+                      sendCommentTelegramFinel(namePatch, deployResult, env, tasksName_success, tasksName_part_success, tasksName_error, building_release_branch)
+              else:
+                  print('No tasks from RocketSiebel and Git')
+                  sendCommentTelegramFinel(namePatch, deployResult, env, tasksName_success, tasksName_part_success, tasksName_error, building_release_branch)
+              ###else:
+              ###     try:
+              ###        with open('/tmp/siebel-deploy/releasebranchlog/' +"{{ target_environment }}" +'/' +namePatch +'/' + namePatch, 'r') as file:
+              ###            str_jira_tasks = file.readline()
+              ###            tasksName = str_jira_tasks.split(' ')
+              ###            print('----taskName for Git without Rocket for sendCommentTelegram------')
+              ###            print(tasksName)
+              ###            file.close()
+              ###            sendCommentTelegramFinel(namePatch, deployResult, env, tasksName, building_release_branch)
+              ###     except:
+              ###        print('No tasks from RocketSiebel and from Git')
+              ###        tasksName = ''
+              ###        sendCommentTelegramFinel(namePatch, deployResult, env, tasksName, building_release_branch)
+ 
+def sendCommentTelegramFinel(namePatch, deployResult, env, tasksName_success, tasksName_part_success, tasksName_error, building_release_branch):
+    if len(tasksName_success) != 0:
+        tasksName_success = list(set(tasksName_success))
+        tasksName_success = '\\n'.join(tasksName_success)
+        print("MY_RESULT=" + deployResult)
+        text_success = '🟩 Список задач объекты установлены:\\n' + tasksName_success
+    if len(tasksName_part_success) != 0:
+        tasksName_part_success = list(set(tasksName_part_success))
+        tasksName_part_success = '\\n'.join(tasksName_part_success)
+        print("MY_RESULT=" + deployResult)
+        text_part = '🔸 Список задач объекты установлены частично:\\n' + tasksName_part_success
+    if len(tasksName_error) != 0:
+        tasksName_error = list(set(tasksName_error))
+        tasksName_error = '\\n'.join(tasksName_error)
+        print("MY_RESULT=" + deployResult)
+        text_error = '♦ Список задач объекты не установлены:\\n' + tasksName_error
+ 
+    if len(tasksName_success) != 0:
+       print('Tasks Successfully')
+    if len(tasksName_part_success) != 0:
+       print('Tasks Partially Successfully')
+    if len(tasksName_error) != 0:
+       print('Tasks with Error')
+    if (len(tasksName_success) == 0 and len(tasksName_part_success) == 0 and len(tasksName_error) == 0):
+        print("MyRESULT=")
+        deployResult = 'NOTASKS'
+        print("MyRESULT=" + deployResult)
+ 
+    if deployResult == 'UNSTABLE':
+        text = 'Имя патча: ' + namePatch + '\\nСреда: ' + env + '\\nСтатус: 🔶 Установка завершена с ошибками. \\n'
+        if len(tasksName_error) != 0:
+            text = text + text_error + '\\n'
+        if len(tasksName_part_success) != 0:
+            text = text + text_part + '\\n'
+        if len(tasksName_success) != 0:
+            text = text + text_success
+        sendStatusTelegram(namePatch, text)
+    if deployResult == 'SUCCESS' and len(tasksName_success) != 0 :
+        text = 'Имя патча: ' + namePatch + '\\nСреда: ' + env + '\\nСтатус: ✅ Установка завершена успешно.\\nСписок задач:\\n' + tasksName_success
+        sendStatusTelegram(namePatch, text)
+ 
+    if deployResult == 'SUCCESS' and len(tasksName_success) == 0 :
+        text = 'Имя патча: ' + namePatch + '\\nСреда: ' + env + '\\nСтатус: ✅ Установка завершена.\\nНет задач для установки RocketSiebel и Git'
+        sendStatusTelegram(namePatch, text)
+   
+    if deployResult == 'NOTASKS' and os.environ["MY_RESULT"] != 'SYNC':
+        text = 'Имя патча: ' + namePatch + '\\nСреда: ' + env + '\\nСтатус: ✅ Нет задач для установки!'
+        sendStatusTelegram(namePatch, text)
+ 
+    if deployResult == 'NOTASKS' and len(building_release_branch) != 0 :
+        text = 'Имя патча: ' + namePatch + '\\nСреда: ' + env + '\\nСтатус: ✅ Сборка релизной ветки выполнена успешно!'
+        sendStatusTelegram(namePatch, text)
+ 
+def main():
+    if len(sys.argv) < 2:
+        print("Invalid argument")
+        sys.exit(1)
+ 
+    if sys.argv[1] == "get_issue_jira":
+        getIssueFromJira()
+        return
+ 
+    if sys.argv[1] == "create_patch":
+        if len(sys.argv) < 4:
+            print("Invalid argument")
+            sys.exit(1)
+        createPathRocketSiebel(sys.argv[2])
+ 
+    if sys.argv[1] == "get_conflict":
+        if len(sys.argv) < 3:
+            print("Invalid argument")
+            sys.exit(1)
+        getPatchConflict(sys.argv[2])
+ 
+    if sys.argv[1] == "resolve_conflict":
+        if len(sys.argv) < 4:
+            print("Invalid argument")
+            sys.exit(1)
+        resolvePathConflict(sys.argv[2])
+ 
+    if sys.argv[1] == "merge_patch":
+        if len(sys.argv) < 3:
+            print("Invlaid argument")
+            sys.exit(1)
+        print('--- merge path---')
+        print('--- sys. argv[2]----')
+        print(sys.argv[2])
+        mergePatchRocketSiebel(sys.argv[2])
+ 
+ 
+    if sys.argv[1] == "create_release_branch":
+        if len(sys.argv) < 3:
+            print("Invlaid argument")
+            sys.exit(1)
+        createReleaseBranch(sys.argv[2])
+ 
+    if sys.argv[1] == "start_rocketsiebel_deploy":
+        if len(sys.argv) < 3:
+            print("Invalid argument")
+            sys.exit(1)
+        startRocketSeibelDeploy(sys.argv[2])
+ 
+    if sys.argv[1] == "merge_release_branch":
+        if len(sys.argv) < 3:
+            print("Invlaid argument")
+            sys.exit(1)
+        mergeReleaseBranch(sys.argv[2])
+ 
+    if sys.argv[1] == "add_label_development_object":
+        if len(sys.argv) < 3:
+            print("Invalid argument")
+            sys.exit(1)
+        addDevelopmentObjectLabel(sys.argv[2])
+   
+    if sys.argv[1] == "send_comment_jira_final":
+        if len(sys.argv) < 3:
+            print("Invalid argument")
+            sys.exit(1)
+        sendCommentJiraFinal(sys.argv[2])
+   
+    if sys.argv[1] == "set_status_tasks":
+        print("OK")
+        if len(sys.argv) < 4:
+            print("Invalid argument")
+            sys.exit(1)
+        setStatusTasks(sys.argv[2], sys.argv[3])
+       
+    if sys.argv[1] == "send_status_telegram":
+        print("start telegram-step")
+        sendCommentTelegram(sys.argv[2])
+ 
+    return ""
+ 
+ 
+if __name__ == "__main__":
+    main()
