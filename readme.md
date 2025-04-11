@@ -445,12 +445,7 @@ Readme.md
  
 ### <a name="PipelinesRocketSeibelDeployParameters"></a> Параметры запуска
  
-Данный пайплайн имеет следующие параметры запуска:
- 
-![rocketsiebel-deploy-parameters.png](assets/rocketseibel-deploy-parameters.png)
- 
-Подробнее о параметрах:
- 
+
 * PATCH_NAME - название патча RocketSiebel для деплоя. Может принимать любое значение. Пример: `080420-214dailyfix-night`
 * SKIP_* (вместо * указано название шага) - служит для пропуска какой либо из стадии пайплайна. Например, если необходимо пропустить стадию **Download patch** необходимо отметить параметр **SKIP_DOWNLOAD_PATCH**
 * INITIATOR_EMAIL - указывается почта, от имени которой будет по итогу рассылаться сообщения об успешности работы пайплайна.
