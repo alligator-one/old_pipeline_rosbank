@@ -1,0 +1,2 @@
+*SET TNS_ADMIN=c:\RocketSiebel\SiebelAgent\Conf\env\{{ env }}
+"{{ path_java }}" -jar "C:\RocketSiebel\SiebelAgent\Lib\siebel-export-cli-adm.jar" adm-export {{ env }} "01/01/2018 00:00:00" {{ siebel_user }} {{ siebel_pass }} "{{ siebel_repo }}" "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST={{ siebel_db_host }})(PORT={{ siebel_db_port }}))(CONNECT_DATA=(SERVER=dedicated)(SERVICE_NAME={{ siebel_db_service_name }})))"  
