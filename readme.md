@@ -547,6 +547,4 @@ Readme.md
  
 ### <a name="PipelinesDockerBuildDevStageBuildImage"></a> Build image
  
-Собирает docker образ на агенте. Dockerfile находится по пути `scripts/Dockerfile`. [Подробнее о сборке Docker образов](#Docker)
- 
-### <a name="PipelinesDockerBuildDevStagePublish"></a> Publish# old_pipeline_rosbank
+Собирает docker образ на агенте. Dockerfile находится по пути `scripts/Dockerfile`. 
